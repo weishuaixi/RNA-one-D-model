@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+wandb/
+checkpoints/
+*.ckpt
+
+data/*.fasta
+data/*.fa
+data/*.fna
+data/pdbs/
+!data/.gitkeep

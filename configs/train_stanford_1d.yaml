@@ -1,0 +1,41 @@
+seed: 42
+
+wandb:
+  project: rna-one-d-model
+  name: stanford-rna-1d-scaffold
+  entity:
+  log_model: false
+
+data:
+  train_data: F:/github_item/stanford-rna-3d-folding-data/train_sequences.csv
+  motif_length: 16
+  stem_length: 128
+  min_flank_length: 8
+  max_source_length: 64
+  max_target_length: 320
+  batch_size: 128
+  num_workers: 8
+  val_fraction: 0.05
+  seed: 42
+
+model:
+  d_model: 768
+  nhead: 12
+  num_encoder_layers: 8
+  num_decoder_layers: 8
+  dim_feedforward: 3072
+  dropout: 0.1
+  lr: 0.0003
+  weight_decay: 0.01
+
+trainer:
+  checkpoint_dir: checkpoints
+  args:
+    accelerator: gpu
+    devices: 1
+    precision: bf16-mixed
+    max_epochs: 20
+    gradient_clip_val: 1.0
+    accumulate_grad_batches: 1
+    log_every_n_steps: 20
+    val_check_interval: 0.25
