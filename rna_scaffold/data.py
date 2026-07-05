@@ -29,6 +29,49 @@ class ScaffoldExample:
     right_sequence: str
 
 
+@dataclass(frozen=True)
+class MaskedScaffoldExample:
+    """RNA scaffold inpainting example with functional bases kept fixed."""
+
+    masked_sequence: str
+    target_sequence: str
+    fixed_positions: tuple[int, ...]
+
+    @property
+    def fixed_sequence(self) -> str:
+        return "".join(self.target_sequence[position] for position in self.fixed_positions)
+
+    @classmethod
+    def from_mask_pattern(cls, target_sequence: str, mask_pattern: str) -> "MaskedScaffoldExample":
+        target = target_sequence.strip().upper().replace("T", "U")
+        pattern = mask_pattern.strip().upper().replace("T", "U")
+        if len(target) != len(pattern):
+            raise ValueError("target_sequence and mask_pattern must have the same length.")
+        if not validate_rna_sequence(target):
+            raise ValueError("target_sequence must contain only A, U, C, and G.")
+
+        masked_tokens: list[str] = []
+        fixed_positions: list[int] = []
+        for index, marker in enumerate(pattern):
+            if marker == "X":
+                masked_tokens.append("<MASK>")
+                continue
+            if marker not in "AUCG":
+                raise ValueError("mask_pattern must contain only A, U, C, G, or X.")
+            if marker != target[index]:
+                raise ValueError("Fixed bases in mask_pattern must match target_sequence.")
+            masked_tokens.append(marker)
+            fixed_positions.append(index)
+
+        if not fixed_positions:
+            raise ValueError("mask_pattern must keep at least one functional motif base fixed.")
+        return cls(
+            masked_sequence="".join(masked_tokens),
+            target_sequence=target,
+            fixed_positions=tuple(fixed_positions),
+        )
+
+
 class RnaScaffoldDataset(Dataset):
     """Teacher-forcing dataset for motif-conditioned L/R scaffold generation."""
 
@@ -92,6 +135,58 @@ class RnaScaffoldDataset(Dataset):
                     right_sequence=right,
                 )
             )
+        return examples
+
+
+class RnaMaskedScaffoldDataset(Dataset):
+    """Teacher-forcing dataset for motif-fixed RNA scaffold inpainting."""
+
+    def __init__(
+        self,
+        examples: list[MaskedScaffoldExample],
+        tokenizer: RnaTokenizer,
+        max_source_length: int,
+        max_target_length: int,
+    ) -> None:
+        self.examples = examples
+        self.tokenizer = tokenizer
+        self.max_source_length = max_source_length
+        self.max_target_length = max_target_length
+
+    def __len__(self) -> int:
+        return len(self.examples)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        example = self.examples[index]
+        source = f"<BOS>{example.masked_sequence}<EOS>"
+        target = f"<BOS>{example.target_sequence}<EOS>"
+        return {
+            "input_ids": self._encode_and_pad(source, self.max_source_length),
+            "labels": self._encode_and_pad(target, self.max_target_length),
+        }
+
+    def _encode_and_pad(self, text: str, max_length: int) -> torch.Tensor:
+        ids = self.tokenizer.encode(text)[:max_length]
+        ids += [self.tokenizer.pad_token_id] * (max_length - len(ids))
+        return torch.tensor(ids, dtype=torch.long)
+
+    @staticmethod
+    def examples_from_sequences(
+        sequences: list[str],
+        motif_length: int,
+        min_flank_length: int = 1,
+    ) -> list[MaskedScaffoldExample]:
+        examples: list[MaskedScaffoldExample] = []
+        for raw_sequence in sequences:
+            sequence = raw_sequence.strip().upper().replace("T", "U")
+            if len(sequence) < motif_length + 2 * min_flank_length:
+                continue
+            if not validate_rna_sequence(sequence):
+                continue
+            start = (len(sequence) - motif_length) // 2
+            end = start + motif_length
+            mask_pattern = "X" * start + sequence[start:end] + "X" * (len(sequence) - end)
+            examples.append(MaskedScaffoldExample.from_mask_pattern(sequence, mask_pattern))
         return examples
 
 

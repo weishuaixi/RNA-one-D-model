@@ -8,6 +8,7 @@ wandb:
 
 data:
   train_data: data/pdbs
+  task: masked_scaffold
   motif_length: 32
   stem_length: 96
   max_source_length: 96

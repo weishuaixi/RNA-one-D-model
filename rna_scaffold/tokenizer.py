@@ -8,6 +8,7 @@ class SpecialTokens:
     pad: str = "<PAD>"
     bos: str = "<BOS>"
     eos: str = "<EOS>"
+    mask: str = "<MASK>"
     left: str = "<LEFT>"
     end_left: str = "<END_LEFT>"
     right: str = "<RIGHT>"
@@ -23,6 +24,7 @@ class RnaTokenizer:
             self.special.pad,
             self.special.bos,
             self.special.eos,
+            self.special.mask,
             self.special.left,
             self.special.end_left,
             self.special.right,

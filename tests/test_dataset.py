@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from rna_scaffold.data import RnaScaffoldDataset, ScaffoldExample, load_sequences
+from rna_scaffold.data import (
+    MaskedScaffoldExample,
+    RnaMaskedScaffoldDataset,
+    RnaScaffoldDataset,
+    ScaffoldExample,
+    load_sequences,
+)
 from rna_scaffold.tokenizer import RnaTokenizer
 from rna_scaffold.utils import complementarity_rate, reverse_complement
 
@@ -64,3 +70,48 @@ def test_load_sequences_accepts_kaggle_sequence_csv(tmp_path: Path):
     )
 
     assert load_sequences(csv_path) == ["AAACCCGGG", "AAAXXX"]
+
+
+def test_masked_scaffold_example_keeps_functional_motif_and_masks_scaffold():
+    example = MaskedScaffoldExample.from_mask_pattern(
+        target_sequence="AAAGCGGUUU",
+        mask_pattern="XXXGCGGXXX",
+    )
+
+    assert example.target_sequence == "AAAGCGGUUU"
+    assert example.masked_sequence == "<MASK><MASK><MASK>GCGG<MASK><MASK><MASK>"
+    assert example.fixed_sequence == "GCGG"
+    assert example.fixed_positions == (3, 4, 5, 6)
+
+
+def test_masked_scaffold_dataset_trains_inpainting_from_masked_sequence_to_full_sequence():
+    tokenizer = RnaTokenizer()
+    example = MaskedScaffoldExample.from_mask_pattern(
+        target_sequence="AAAGCGGUUU",
+        mask_pattern="XXXGCGGXXX",
+    )
+    dataset = RnaMaskedScaffoldDataset(
+        examples=[example],
+        tokenizer=tokenizer,
+        max_source_length=32,
+        max_target_length=32,
+    )
+
+    item = dataset[0]
+    source = tokenizer.decode(item["input_ids"].tolist())
+    target = tokenizer.decode(item["labels"].tolist())
+
+    assert source.startswith("<BOS><MASK><MASK><MASK>GCGG")
+    assert target.startswith("<BOS>AAAGCGGUUU<EOS>")
+
+
+def test_masked_scaffold_examples_from_sequences_fix_center_motif_by_default():
+    examples = RnaMaskedScaffoldDataset.examples_from_sequences(
+        sequences=["AAAACCCCUUUU"],
+        motif_length=4,
+    )
+
+    assert len(examples) == 1
+    assert examples[0].target_sequence == "AAAACCCCUUUU"
+    assert examples[0].fixed_sequence == "CCCC"
+    assert examples[0].masked_sequence == "<MASK><MASK><MASK><MASK>CCCC<MASK><MASK><MASK><MASK>"

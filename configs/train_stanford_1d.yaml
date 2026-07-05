@@ -8,6 +8,7 @@ wandb:
 
 data:
   train_data: F:/github_item/stanford-rna-3d-folding-data/train_sequences.csv
+  task: masked_scaffold
   motif_length: 16
   stem_length: 128
   min_flank_length: 8

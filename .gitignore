@@ -3,8 +3,12 @@ __pycache__/
 .pytest_cache/
 
 wandb/
+logs/
 checkpoints/
+checkpoints_3d/
 *.ckpt
+*.pt
+outputs/
 
 data/*.fasta
 data/*.fa

@@ -31,6 +31,130 @@ class ScaffoldResult:
     left_right_complementarity: float
 
 
+@dataclass(frozen=True)
+class MaskedScaffoldPrompt:
+    motif: str
+    masked_sequence: str
+    motif_start: int
+    total_length: int
+
+
+def build_auto_masked_scaffold_prompts(
+    motif: str,
+    num_candidates: int = 16,
+    min_total_length: int | None = None,
+    max_total_length: int | None = None,
+    rng_seed: int | None = None,
+) -> list[MaskedScaffoldPrompt]:
+    """Create internal mask-inpainting prompts from only a fixed motif.
+
+    The caller supplies the functional motif only. Lengths and motif offsets are
+    sampled internally so a downstream masked-scaffold model can infill multiple
+    candidate RNA scaffolds and rerank them.
+    """
+    motif = motif.upper()
+    if not validate_rna_sequence(motif):
+        raise ValueError("motif must contain only A, U, C, and G.")
+    if num_candidates <= 0:
+        raise ValueError("num_candidates must be positive.")
+
+    default_min = max(len(motif) + 8, len(motif) * 3)
+    default_max = max(default_min + 1, len(motif) * 8)
+    min_length = default_min if min_total_length is None else min_total_length
+    max_length = default_max if max_total_length is None else max_total_length
+    if min_length <= len(motif):
+        raise ValueError("min_total_length must be greater than motif length.")
+    if max_length < min_length:
+        raise ValueError("max_total_length must be greater than or equal to min_total_length.")
+
+    rng = random.Random(rng_seed)
+    prompts: list[MaskedScaffoldPrompt] = []
+    for _ in range(num_candidates):
+        total_length = rng.randint(min_length, max_length)
+        available_scaffold = total_length - len(motif)
+        centered_left = available_scaffold // 2
+        jitter_window = max(1, available_scaffold // 4)
+        motif_start = min(
+            available_scaffold,
+            max(0, centered_left + rng.randint(-jitter_window, jitter_window)),
+        )
+        right_masks = total_length - motif_start - len(motif)
+        masked_sequence = "<MASK>" * motif_start + motif + "<MASK>" * right_masks
+        prompts.append(
+            MaskedScaffoldPrompt(
+                motif=motif,
+                masked_sequence=masked_sequence,
+                motif_start=motif_start,
+                total_length=total_length,
+            )
+        )
+    return prompts
+
+
+def build_motif_scaffold_sequence(
+    motif: str,
+    num_candidates: int = 128,
+    min_total_length: int | None = None,
+    max_total_length: int | None = None,
+    rng_seed: int | None = None,
+) -> ScaffoldResult:
+    """Return one complete RNA scaffold sequence from only a fixed motif.
+
+    This is the public motif-only entry point. It mirrors the paper's motif
+    scaffolding setup at the interface level: the user supplies a functional
+    motif, while masks, candidate lengths, and motif offsets are internal
+    generation details.
+    """
+    motif = motif.upper()
+    prompts = build_auto_masked_scaffold_prompts(
+        motif=motif,
+        num_candidates=num_candidates,
+        min_total_length=min_total_length,
+        max_total_length=max_total_length,
+        rng_seed=rng_seed,
+    )
+    rng = random.Random(rng_seed)
+    best: ScaffoldResult | None = None
+    for prompt in prompts:
+        left_length = prompt.motif_start
+        right_length = prompt.total_length - prompt.motif_start - len(motif)
+        left_sequence = "".join(rng.choice("AUCG") for _ in range(left_length))
+        template_right = _naturalized_right_sequence(
+            left_sequence=left_sequence,
+            mutation_rate=rng.uniform(0.08, 0.2),
+            rng=rng,
+        )
+        if len(template_right) >= right_length:
+            right_sequence = template_right[:right_length]
+        else:
+            right_sequence = template_right + "".join(rng.choice("AUCG") for _ in range(right_length - len(template_right)))
+        quality_score = _score_scaffold_candidate(left_sequence, right_sequence)
+        candidate = _make_scaffold_result(motif, left_sequence, right_sequence, quality_score)
+        if best is None or candidate.quality_score > best.quality_score:
+            best = candidate
+
+    if best is None:  # pragma: no cover - guarded by num_candidates validation
+        raise RuntimeError("No scaffold candidates were generated.")
+    return best
+
+
+def generate_rna_sequence(
+    motif: str,
+    num_candidates: int = 128,
+    min_total_length: int | None = None,
+    max_total_length: int | None = None,
+    rng_seed: int | None = None,
+) -> str:
+    """Generate one complete RNA sequence from a fixed RNA motif."""
+    return build_motif_scaffold_sequence(
+        motif=motif,
+        num_candidates=num_candidates,
+        min_total_length=min_total_length,
+        max_total_length=max_total_length,
+        rng_seed=rng_seed,
+    ).full_sequence
+
+
 def build_single_best_result(
     motif: str,
     left_sequence: str,

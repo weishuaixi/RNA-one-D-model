@@ -10,7 +10,7 @@ try:
 except ImportError:  # pragma: no cover
     import pytorch_lightning as L
 
-from rna_scaffold.data import RnaScaffoldDataset, load_sequences
+from rna_scaffold.data import RnaMaskedScaffoldDataset, RnaScaffoldDataset, load_sequences
 from rna_scaffold.tokenizer import RnaTokenizer
 
 
@@ -20,6 +20,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         tokenizer: RnaTokenizer,
         train_data: str | None = None,
         train_fasta: str | None = None,
+        task: str = "flank_scaffold",
         motif_length: int = 32,
         stem_length: int = 64,
         min_flank_length: int = 1,
@@ -35,6 +36,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         if not str(self.train_data):
             raise ValueError("Either train_data or train_fasta must be provided.")
         self.tokenizer = tokenizer
+        self.task = task
         self.motif_length = motif_length
         self.stem_length = stem_length
         self.min_flank_length = min_flank_length
@@ -47,16 +49,27 @@ class RnaScaffoldDataModule(L.LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         sequences = load_sequences(self.train_data)
-        examples = RnaScaffoldDataset.examples_from_sequences(
-            sequences=sequences,
-            motif_length=self.motif_length,
-            stem_length=self.stem_length,
-            min_flank_length=self.min_flank_length,
-        )
+        if self.task == "flank_scaffold":
+            examples = RnaScaffoldDataset.examples_from_sequences(
+                sequences=sequences,
+                motif_length=self.motif_length,
+                stem_length=self.stem_length,
+                min_flank_length=self.min_flank_length,
+            )
+            dataset_class = RnaScaffoldDataset
+        elif self.task == "masked_scaffold":
+            examples = RnaMaskedScaffoldDataset.examples_from_sequences(
+                sequences=sequences,
+                motif_length=self.motif_length,
+                min_flank_length=self.min_flank_length,
+            )
+            dataset_class = RnaMaskedScaffoldDataset
+        else:
+            raise ValueError("task must be either 'flank_scaffold' or 'masked_scaffold'.")
         if not examples:
             raise ValueError("No valid training examples were built from the training data.")
 
-        dataset = RnaScaffoldDataset(
+        dataset = dataset_class(
             examples=examples,
             tokenizer=self.tokenizer,
             max_source_length=self.max_source_length,
