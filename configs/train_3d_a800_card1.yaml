@@ -1,10 +1,12 @@
 seed: 42
 
 data:
-  sequences_csv: F:/github_item/stanford-rna-3d-folding-data/train_sequences.v2.csv
-  labels_csv: F:/github_item/stanford-rna-3d-folding-data/train_labels.v2.csv
+  sequences_csv: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/train_sequences.v2.csv"
+  labels_csv: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/train_labels.v2.csv"
   max_records:
   model_index: 1
+  max_sequence_length: 1024
+  min_coord_coverage: 0.8
 
 model:
   d_model: 512

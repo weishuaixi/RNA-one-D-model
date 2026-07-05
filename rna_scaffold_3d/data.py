@@ -35,6 +35,8 @@ class StanfordRna3DDataset(Dataset):
         labels_csv: str | Path,
         max_records: int | None = None,
         model_index: int = 1,
+        max_sequence_length: int | None = None,
+        min_coord_coverage: float = 0.0,
     ) -> "StanfordRna3DDataset":
         return cls(
             load_stanford_rna_3d_records(
@@ -42,6 +44,8 @@ class StanfordRna3DDataset(Dataset):
                 labels_csv=labels_csv,
                 max_records=max_records,
                 model_index=model_index,
+                max_sequence_length=max_sequence_length,
+                min_coord_coverage=min_coord_coverage,
             )
         )
 
@@ -65,8 +69,14 @@ def load_stanford_rna_3d_records(
     labels_csv: str | Path,
     max_records: int | None = None,
     model_index: int = 1,
+    max_sequence_length: int | None = None,
+    min_coord_coverage: float = 0.0,
 ) -> list[StanfordRna3DRecord]:
-    sequences = _load_sequences(sequences_csv, max_records=max_records)
+    sequences = _load_sequences(
+        sequences_csv,
+        max_records=max_records,
+        max_sequence_length=max_sequence_length,
+    )
     coord_rows = _load_label_coordinates(labels_csv, model_index=model_index, target_ids=set(sequences))
     records: list[StanfordRna3DRecord] = []
     for target_id, sequence in sequences.items():
@@ -80,7 +90,8 @@ def load_stanford_rna_3d_records(
             if 0 <= index < len(sequence):
                 coords[index] = torch.tensor(coord, dtype=torch.float32)
                 mask[index] = valid
-        if mask.any():
+        coverage = float(mask.float().mean().item()) if len(sequence) else 0.0
+        if mask.any() and coverage >= min_coord_coverage:
             records.append(
                 StanfordRna3DRecord(
                     target_id=target_id,
@@ -124,7 +135,11 @@ def collate_3d_batch(items: list[dict[str, torch.Tensor | str]]) -> dict[str, to
     }
 
 
-def _load_sequences(path: str | Path, max_records: int | None) -> dict[str, str]:
+def _load_sequences(
+    path: str | Path,
+    max_records: int | None,
+    max_sequence_length: int | None,
+) -> dict[str, str]:
     sequences: dict[str, str] = {}
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -132,6 +147,8 @@ def _load_sequences(path: str | Path, max_records: int | None) -> dict[str, str]
             target_id = (row.get("target_id") or "").strip()
             sequence = (row.get("sequence") or "").strip().upper().replace("T", "U")
             if not target_id or not validate_rna_sequence(sequence):
+                continue
+            if max_sequence_length is not None and len(sequence) > max_sequence_length:
                 continue
             sequences[target_id] = sequence
             if max_records is not None and len(sequences) >= max_records:

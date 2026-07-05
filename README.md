@@ -152,7 +152,7 @@ python generate_3d.py --motif GCGG --name candidate_1 --predictor-command python
 Stanford RNA 3D Folding 数据集路径已经接入服务器配置：
 
 ```text
-F:/github_item/stanford-rna-3d-folding-data
+/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data
 ```
 
 服务器上一张 A800、使用物理 1 号卡训练：
@@ -213,6 +213,18 @@ data:
   sequences_csv: ...
   labels_csv: ...
 ```
+
+当前服务器配置默认使用 v2 训练集，并做了两层过滤，适合第一阶段稳定训练：
+
+```yaml
+data:
+  sequences_csv: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/train_sequences.v2.csv"
+  labels_csv: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/train_labels.v2.csv"
+  max_sequence_length: 1024
+  min_coord_coverage: 0.8
+```
+
+在你当前这份 Stanford 数据上，过滤后约有 `3182` 条 RNA 可用于训练，最长 `1024 nt`，最低坐标覆盖率 `80%`。
 
 如果要使用旧的左右 flank 预测任务：
 
