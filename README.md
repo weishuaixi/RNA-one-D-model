@@ -158,6 +158,7 @@ Stanford RNA 3D Folding 数据集路径已经接入服务器配置：
 服务器上一张 A800、使用物理 1 号卡训练：
 
 ```bash
+bash scripts/setup_server_env.sh
 bash scripts/train_3d_a800_card1.sh
 ```
 
