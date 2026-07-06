@@ -3,7 +3,7 @@ seed: 42
 wandb:
   enabled: true
   project: rna-one-d-3d
-  name: a800-full-2048-rhofold
+  name: a800-card1-full-2048-safe
   entity:
   mode: online
 
@@ -18,15 +18,15 @@ data:
 
 model:
   type: rhofold
-  d_model: 512
+  d_model: 384
   nhead: 8
-  num_e2e_layers: 8
+  num_e2e_layers: 6
   num_structure_layers: 4
-  dim_feedforward: 2048
+  dim_feedforward: 1536
   dropout: 0.1
   max_len: 2048
-  pair_dim: 256
-  msa_dim: 256
+  pair_dim: 128
+  msa_dim: 128
   num_distance_bins: 32
   recycle_iters: 2
 
@@ -49,12 +49,12 @@ optimizer:
 trainer:
   accelerator: gpu
   cuda_device: 1
-  batch_size: 2
+  batch_size: 1
   num_workers: 8
   max_epochs: 80
   val_fraction: 0.05
   checkpoint_dir: checkpoints_3d_a800_full
   show_progress: true
   mixed_precision: true
-  accumulate_grad_batches: 16
+  accumulate_grad_batches: 32
   gradient_clip_norm: 1.0
