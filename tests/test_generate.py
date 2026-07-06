@@ -158,3 +158,24 @@ def test_generate_rna_sequence_returns_only_full_sequence_string_from_motif():
     assert set(sequence).issubset({"A", "U", "C", "G"})
     assert "GCGG" in sequence
     assert "<MASK>" not in sequence
+
+
+def test_generate_rna_sequence_can_follow_training_length_distribution_without_user_masks(tmp_path):
+    train_csv = tmp_path / "train_sequences.csv"
+    train_csv.write_text(
+        "target_id,sequence\n"
+        "a,AAAAAAAAAAGCGGCCCCCCCCCC\n"
+        "b,UUUUUUUUUUGCGGGGGGGGGGGG\n",
+        encoding="utf-8",
+    )
+
+    sequence = generate_rna_sequence(
+        motif="GCGG",
+        num_candidates=8,
+        rng_seed=4,
+        train_data=train_csv,
+    )
+
+    assert len(sequence) == 24
+    assert "GCGG" in sequence
+    assert "<MASK>" not in sequence
