@@ -1,0 +1,60 @@
+seed: 42
+
+wandb:
+  enabled: false
+  project: rna-one-d-3d
+  name: local-windows-smoke
+  entity:
+  mode: offline
+
+data:
+  source: cif_all_atom
+  sequences_csv: "F:/github_item/stanford-rna-3d-folding-data/train_sequences.v2.csv"
+  cif_dir: "F:/github_item/stanford-rna-3d-folding-data/PDB_RNA"
+  max_records: 100
+  max_sequence_length: 256
+  min_atom_coverage: 0.5
+  center_coordinates: true
+
+model:
+  type: rhofold
+  d_model: 128
+  nhead: 4
+  num_e2e_layers: 2
+  num_structure_layers: 2
+  dim_feedforward: 512
+  dropout: 0.1
+  max_len: 512
+  pair_dim: 64
+  msa_dim: 64
+  num_distance_bins: 32
+  recycle_iters: 1
+
+optimizer:
+  lr: 0.0002
+  weight_decay: 0.01
+  min_lr: 0.000001
+  warmup_steps: 20
+  coord_mse_weight: 0.1
+  pairwise_weight: 0.1
+  pair_ce_weight: 0.1
+  fape_weight: 0.05
+  clash_weight: 0.02
+  bond_weight: 0.05
+  angle_weight: 0.02
+  torsion_weight: 0.02
+  secondary_weight: 0.02
+  confidence_weight: 0.01
+
+trainer:
+  accelerator: cpu
+  cuda_device: 0
+  batch_size: 2
+  num_workers: 0
+  max_epochs: 1
+  val_fraction: 0.05
+  checkpoint_dir: outputs/checkpoints_3d_local_windows
+  show_progress: true
+  mixed_precision: false
+  accumulate_grad_batches: 1
+  gradient_clip_norm: 1.0
