@@ -3,7 +3,7 @@ seed: 42
 wandb:
   enabled: true
   project: rna-one-d-3d
-  name: a800-card1-full-2048-safe
+  name: a800-card1-full-1536-safe
   entity:
   mode: online
 
@@ -12,7 +12,7 @@ data:
   sequences_csv: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/train_sequences.v2.csv"
   cif_dir: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/PDB_RNA"
   max_records:
-  max_sequence_length: 2048
+  max_sequence_length: 1536
   min_atom_coverage: 0.5
   center_coordinates: true
 
@@ -24,7 +24,7 @@ model:
   num_structure_layers: 4
   dim_feedforward: 1536
   dropout: 0.1
-  max_len: 2048
+  max_len: 1536
   pair_dim: 128
   msa_dim: 128
   num_distance_bins: 32
