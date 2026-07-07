@@ -5,6 +5,7 @@ import torch
 from rna_scaffold_3d.data import (
     StanfordRnaAllAtomDataset,
     StanfordRna3DDataset,
+    _load_sequences,
     collate_3d_batch,
     load_stanford_rna_3d_records,
 )
@@ -34,6 +35,20 @@ def test_load_stanford_rna_3d_records_joins_sequences_and_coordinates(tmp_path: 
     assert records[0].sequence == "AUG"
     assert records[0].coords.shape == (3, 3)
     assert records[0].coord_mask.tolist() == [True, True, True]
+
+
+def test_load_sequences_reads_only_target_id_and_sequence_columns(tmp_path: Path):
+    sequences = tmp_path / "train_sequences.csv"
+    sequences.write_text(
+        "target_id,sequence,temporal_cutoff,description,all_sequences\n"
+        "1ABC_A,AUG,2020-01-01,example,\"bad quote that should be ignored\n"
+        "2ABC_A,GCA,2020-01-01,example,\"another bad quote\n",
+        encoding="utf-8",
+    )
+
+    loaded = _load_sequences(sequences, max_records=None, max_sequence_length=None)
+
+    assert loaded == {"1ABC_A": "AUG", "2ABC_A": "GCA"}
 
 
 def test_load_stanford_rna_3d_records_masks_missing_coordinates(tmp_path: Path):

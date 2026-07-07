@@ -207,10 +207,19 @@ def _load_sequences(
 ) -> dict[str, str]:
     sequences: dict[str, str] = {}
     with Path(path).open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            target_id = (row.get("target_id") or "").strip()
-            sequence = (row.get("sequence") or "").strip().upper().replace("T", "U")
+        header = handle.readline().strip().split(",")
+        try:
+            target_idx = header.index("target_id")
+            sequence_idx = header.index("sequence")
+        except ValueError as exc:
+            raise ValueError(f"CSV must contain target_id and sequence columns: {path}") from exc
+        required_prefix = max(target_idx, sequence_idx) + 1
+        for line in handle:
+            fields = line.rstrip("\n\r").split(",", required_prefix)
+            if len(fields) < required_prefix:
+                continue
+            target_id = fields[target_idx].strip()
+            sequence = fields[sequence_idx].strip().upper().replace("T", "U")
             if not target_id or not validate_rna_sequence(sequence):
                 continue
             if max_sequence_length is not None and len(sequence) > max_sequence_length:
