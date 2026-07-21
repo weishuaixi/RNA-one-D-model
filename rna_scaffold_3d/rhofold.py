@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
-from rna_scaffold_3d.data import RNA3D_PAD_ID
 from rna_scaffold_3d.rna_atoms import RNA_NUM_ATOMS
+from rna_scaffold_3d.sequence import RNA3D_MASK_ID, RNA3D_PAD_ID
 
 
 @dataclass(frozen=True)
 class RhoFoldConfig:
-    vocab_size: int = 5
+    vocab_size: int = 6
     d_model: int = 256
     pair_dim: int = 128
     msa_dim: int = 128
@@ -24,6 +26,7 @@ class RhoFoldConfig:
     num_atoms: int = RNA_NUM_ATOMS
     num_distance_bins: int = 32
     recycle_iters: int = 1
+    sequence_loss_initial_weight: float = 0.1
 
 
 class RhoFoldModel(nn.Module):
@@ -43,6 +46,11 @@ class RhoFoldModel(nn.Module):
         self.num_atoms = config.num_atoms
         self.num_distance_bins = config.num_distance_bins
         self.recycle_iters = max(1, int(config.recycle_iters))
+        if config.sequence_loss_initial_weight <= 0:
+            raise ValueError("sequence_loss_initial_weight must be positive.")
+        self.task_log_variances = nn.Parameter(
+            torch.tensor([0.0, -math.log(config.sequence_loss_initial_weight)], dtype=torch.float32)
+        )
 
         self.seq_embedder = SequenceEmbedder(config)
         self.msa_embedder = MSAEmbedder(config)
@@ -56,17 +64,17 @@ class RhoFoldModel(nn.Module):
             nn.GELU(),
             nn.Linear(config.pair_dim, config.num_distance_bins),
         )
-        self.secondary_head = nn.Sequential(
-            nn.LayerNorm(config.pair_dim),
-            nn.Linear(config.pair_dim, config.pair_dim),
-            nn.GELU(),
-            nn.Linear(config.pair_dim, 1),
-        )
         self.plddt_head = nn.Sequential(
             nn.LayerNorm(config.d_model),
             nn.Linear(config.d_model, config.d_model),
             nn.GELU(),
             nn.Linear(config.d_model, 1),
+        )
+        self.sequence_head = nn.Sequential(
+            nn.LayerNorm(config.d_model),
+            nn.Linear(config.d_model, config.d_model),
+            nn.GELU(),
+            nn.Linear(config.d_model, config.vocab_size),
         )
 
     def forward(
@@ -83,6 +91,7 @@ class RhoFoldModel(nn.Module):
         seq = self.seq_embedder(input_ids)
         msa_summary = self.msa_embedder(msa_ids, msa_mask, input_ids)
         pair = self.pair_embedder(seq, input_ids)
+        sequence_logits = self.sequence_head(seq)
         coords = torch.zeros(
             input_ids.size(0),
             input_ids.size(1),
@@ -96,8 +105,11 @@ class RhoFoldModel(nn.Module):
             if recycle_index:
                 seq, pair = self.recycling(seq, pair, coords)
             seq = seq + msa_summary
-            for block in self.e2eformer:
+            for block_index, block in enumerate(self.e2eformer):
                 seq, pair = block(seq, pair, padding_mask)
+                if block_index == 0:
+                    sequence_logits = self.sequence_head(seq)
+                    seq = self.seq_embedder.inject_predicted_bases(seq, sequence_logits, input_ids)
             coords = self.structure_module(seq, pair, padding_mask)
 
         pair = 0.5 * (pair + pair.transpose(1, 2))
@@ -108,9 +120,28 @@ class RhoFoldModel(nn.Module):
         return {
             "coords": coords,
             "pair_distance_logits": self.distogram_head(pair),
-            "secondary_logits": self.secondary_head(pair).squeeze(-1),
             "plddt": plddt,
+            "sequence_logits": sequence_logits,
+            "sequence_embedding": seq,
         }
+
+    def combine_task_losses(
+        self,
+        structure_loss: torch.Tensor,
+        sequence_loss: torch.Tensor,
+    ) -> torch.Tensor:
+        log_variances = self.task_log_variances.clamp(min=-5.0, max=5.0)
+        precisions = torch.exp(-log_variances)
+        return (
+            precisions[0] * structure_loss
+            + log_variances[0]
+            + precisions[1] * sequence_loss
+            + log_variances[1]
+        )
+
+    def learned_task_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
+        weights = torch.exp(-self.task_log_variances.clamp(min=-5.0, max=5.0))
+        return weights[0], weights[1]
 
 
 class SequenceEmbedder(nn.Module):
@@ -119,9 +150,25 @@ class SequenceEmbedder(nn.Module):
         self.embedding = nn.Embedding(config.vocab_size, config.d_model, padding_idx=RNA3D_PAD_ID)
         self.position = SinusoidalPositionEncoding(d_model=config.d_model, max_len=config.max_len)
         self.norm = nn.LayerNorm(config.d_model)
+        self.generated_base_projection = nn.Linear(config.d_model, config.d_model, bias=False)
+        self.generated_norm = nn.LayerNorm(config.d_model)
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.norm(self.position(self.embedding(input_ids)))
+
+    def inject_predicted_bases(
+        self,
+        seq: torch.Tensor,
+        sequence_logits: torch.Tensor,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        generated_mask = input_ids.eq(RNA3D_MASK_ID)
+        if not generated_mask.any():
+            return seq
+        base_probabilities = F.softmax(sequence_logits[..., 1:5], dim=-1)
+        expected_base_embedding = base_probabilities @ self.embedding.weight[1:5]
+        generated = self.generated_norm(seq + self.generated_base_projection(expected_base_embedding))
+        return torch.where(generated_mask.unsqueeze(-1), generated, seq)
 
 
 class SinusoidalPositionEncoding(nn.Module):

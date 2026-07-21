@@ -9,15 +9,7 @@ from pathlib import Path
 import torch
 
 from rna_scaffold.tokenizer import RnaTokenizer
-from rna_scaffold.utils import complementarity_rate, gc_fraction, reverse_complement, validate_rna_sequence
-
-
-_NATURAL_NON_WC_RIGHT_BASES = {
-    "A": ("C", "G"),
-    "U": ("G", "C"),
-    "C": ("A", "U"),
-    "G": ("U", "A"),
-}
+from rna_scaffold.utils import complementarity_rate, validate_rna_sequence
 
 BASES = ("A", "U", "C", "G")
 
@@ -51,12 +43,18 @@ class RnaTrainingPrior:
             start_counts[sequence[0]] += 1
             for left, right in zip(sequence, sequence[1:]):
                 pair_counts[left][right] += 1
-        total_start = sum(start_counts.values()) or 1
-        initial = {base: start_counts.get(base, 0) / total_start for base in BASES}
+
+        # Laplace smoothing keeps every base sampleable, including for small
+        # or compositionally narrow training files.
+        total_start = sum(start_counts.values()) + len(BASES)
+        initial = {base: (start_counts.get(base, 0) + 1) / total_start for base in BASES}
         transition: dict[str, dict[str, float]] = {}
         for previous in BASES:
-            total = sum(pair_counts[previous].values()) or 1
-            transition[previous] = {base: pair_counts[previous].get(base, 0) / total for base in BASES}
+            total = sum(pair_counts[previous].values()) + len(BASES)
+            transition[previous] = {
+                base: (pair_counts[previous].get(base, 0) + 1) / total for base in BASES
+            }
+
         return cls(lengths=lengths, transition=transition, initial=initial)
 
     def has_statistics(self) -> bool:
@@ -187,28 +185,12 @@ def build_motif_scaffold_sequence(
             max_total_length=max_total_length,
             rng_seed=rng_seed,
         )
-    best: ScaffoldResult | None = None
-    for prompt in prompts:
-        left_length = prompt.motif_start
-        right_length = prompt.total_length - prompt.motif_start - len(motif)
-        left_sequence = prior.sample_sequence(left_length, rng)
-        template_right = _naturalized_right_sequence(
-            left_sequence=left_sequence,
-            mutation_rate=rng.uniform(0.08, 0.2),
-            rng=rng,
-        )
-        if len(template_right) >= right_length:
-            right_sequence = template_right[:right_length]
-        else:
-            right_sequence = template_right + prior.sample_sequence(right_length - len(template_right), rng)
-        quality_score = _score_scaffold_candidate(left_sequence, right_sequence)
-        candidate = _make_scaffold_result(motif, left_sequence, right_sequence, quality_score)
-        if best is None or candidate.quality_score > best.quality_score:
-            best = candidate
-
-    if best is None:  # pragma: no cover - guarded by num_candidates validation
-        raise RuntimeError("No scaffold candidates were generated.")
-    return best
+    prompt = rng.choice(prompts)
+    left_length = prompt.motif_start
+    right_length = prompt.total_length - prompt.motif_start - len(motif)
+    left_sequence = prior.sample_sequence(left_length, rng)
+    right_sequence = prior.sample_sequence(right_length, rng)
+    return _make_scaffold_result(motif, left_sequence, right_sequence, quality_score=0.0)
 
 
 def generate_rna_sequence(
@@ -239,10 +221,9 @@ def build_single_best_result(
 ) -> ScaffoldResult:
     """Build the externally returned single-best JSON result.
 
-    The training target encourages the model to generate both sides, but the
-    strict production path can generate one side and construct the other side
-    from a mostly reverse-complement template. A small mutation_rate adds
-    natural stem defects such as wobble-like or mismatch positions.
+    This compatibility helper keeps the older call shape that supplies a left
+    flank, but the right flank is sampled independently as a natural RNA-like
+    sequence. No left/right complementarity is imposed or optimized.
     """
     motif = motif.upper()
     left_sequence = left_sequence.upper()
@@ -251,13 +232,10 @@ def build_single_best_result(
     if not validate_rna_sequence(left_sequence):
         raise ValueError("left_sequence must contain only A, U, C, and G.")
     if not 0 <= mutation_rate <= 0.25:
-        raise ValueError("mutation_rate must be in [0, 0.25] to preserve mostly complementary stems.")
+        raise ValueError("mutation_rate must be in [0, 0.25].")
 
-    right_sequence = _naturalized_right_sequence(
-        left_sequence=left_sequence,
-        mutation_rate=mutation_rate,
-        rng=random.Random(rng_seed),
-    )
+    rng = random.Random(rng_seed)
+    right_sequence = "".join(rng.choice(BASES) for _ in range(len(left_sequence)))
     return _make_scaffold_result(motif, left_sequence, right_sequence, quality_score)
 
 
@@ -272,9 +250,8 @@ def build_random_natural_scaffold_result(
     """Generate a motif-protected one-dimensional scaffold by rule-based sampling.
 
     This is a lightweight baseline for early experiments before a trained model
-    is available: sample variable-length left stems, derive a mostly
-    complementary right stem with natural defects, then return the best-scoring
-    candidate.
+    is available. Both flanks are sampled independently from the training-data
+    prior; no left/right complementarity is imposed.
     """
     motif = motif.upper()
     if not validate_rna_sequence(motif):
@@ -288,20 +265,10 @@ def build_random_natural_scaffold_result(
 
     rng = random.Random(rng_seed)
     prior = RnaTrainingPrior.from_path(train_data) if train_data else RnaTrainingPrior.empty()
-    best: ScaffoldResult | None = None
-    for _ in range(num_candidates):
-        length = rng.randint(min_left_length, max_left_length)
-        left_sequence = prior.sample_sequence(length, rng)
-        mutation_rate = rng.uniform(0.08, 0.2)
-        right_sequence = _naturalized_right_sequence(left_sequence, mutation_rate, rng)
-        quality_score = _score_scaffold_candidate(left_sequence, right_sequence)
-        candidate = _make_scaffold_result(motif, left_sequence, right_sequence, quality_score)
-        if best is None or candidate.quality_score > best.quality_score:
-            best = candidate
-
-    if best is None:  # pragma: no cover - guarded by num_candidates validation
-        raise RuntimeError("No scaffold candidates were generated.")
-    return best
+    length = rng.randint(min_left_length, max_left_length)
+    left_sequence = prior.sample_sequence(length, rng)
+    right_sequence = prior.sample_sequence(length, rng)
+    return _make_scaffold_result(motif, left_sequence, right_sequence, quality_score=0.0)
 
 
 def _build_training_prior_prompts(
@@ -331,26 +298,6 @@ def _build_training_prior_prompts(
     return prompts
 
 
-def _naturalized_right_sequence(
-    left_sequence: str,
-    mutation_rate: float,
-    rng: random.Random,
-) -> str:
-    right = list(reverse_complement(left_sequence))
-    if mutation_rate <= 0 or not right:
-        return "".join(right)
-
-    mutation_count = round(len(left_sequence) * mutation_rate)
-    mutation_count = max(1, min(mutation_count, len(left_sequence)))
-    mutated_left_positions = rng.sample(range(len(left_sequence)), mutation_count)
-
-    for left_index in mutated_left_positions:
-        right_index = len(left_sequence) - 1 - left_index
-        left_base = left_sequence[left_index]
-        right[right_index] = rng.choice(_NATURAL_NON_WC_RIGHT_BASES[left_base])
-    return "".join(right)
-
-
 def _make_scaffold_result(
     motif: str,
     left_sequence: str,
@@ -370,25 +317,6 @@ def _make_scaffold_result(
         motif_preserved=full_sequence == f"{left_sequence}{motif}{right_sequence}",
         left_right_complementarity=rate,
     )
-
-
-def _score_scaffold_candidate(left_sequence: str, right_sequence: str) -> float:
-    complementarity = complementarity_rate(left_sequence, right_sequence)
-    complementarity_score = max(0.0, 1.0 - abs(complementarity - 0.88) / 0.18)
-    gc_score = max(0.0, 1.0 - abs(gc_fraction(left_sequence + right_sequence) - 0.5) / 0.3)
-    homopolymer_penalty = max(0, _longest_homopolymer(left_sequence + right_sequence) - 4) * 0.08
-    return max(0.0, min(1.0, 0.7 * complementarity_score + 0.3 * gc_score - homopolymer_penalty))
-
-
-def _longest_homopolymer(sequence: str) -> int:
-    longest = 0
-    current = 0
-    previous = None
-    for base in sequence:
-        current = current + 1 if base == previous else 1
-        previous = base
-        longest = max(longest, current)
-    return longest
 
 
 def result_to_json(result: ScaffoldResult) -> str:

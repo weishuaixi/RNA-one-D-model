@@ -9,15 +9,13 @@ from rna_scaffold_3d.losses import (
     masked_pairwise_distance_mse,
     pair_distance_cross_entropy,
     plddt_confidence_loss,
-    secondary_logits_bce_loss,
-    secondary_structure_pair_loss,
     torsion_angle_loss,
 )
 from rna_scaffold_3d.rhofold import RhoFoldConfig, RhoFoldModel
 from rna_scaffold_3d.rna_atoms import RNA_ATOM_NAMES, RNA_NUM_ATOMS
 
 
-def test_rhofold_model_returns_coords_distogram_secondary_and_confidence():
+def test_rhofold_model_returns_structure_sequence_embedding_and_confidence():
     config = RhoFoldConfig(
         d_model=32,
         pair_dim=16,
@@ -45,8 +43,9 @@ def test_rhofold_model_returns_coords_distogram_secondary_and_confidence():
 
     assert output["coords"].shape == (1, 5, RNA_NUM_ATOMS, 3)
     assert output["pair_distance_logits"].shape == (1, 5, 5, 8)
-    assert output["secondary_logits"].shape == (1, 5, 5)
     assert output["plddt"].shape == (1, 5)
+    assert output["sequence_logits"].shape == (1, 5, config.vocab_size)
+    assert output["sequence_embedding"].shape == (1, 5, config.d_model)
     assert torch.all(output["plddt"] >= 0)
     assert torch.all(output["plddt"] <= 100)
 
@@ -120,29 +119,92 @@ def test_geometry_losses_are_zero_for_valid_simple_geometry():
     assert torsion_angle_loss(coords, mask).item() >= 0.0
 
 
-def test_secondary_structure_pair_loss_penalizes_far_complementary_pairs():
-    atom_count = len(RNA_ATOM_NAMES)
-    coords = torch.zeros((1, 4, atom_count, 3))
-    mask = torch.zeros((1, 4, atom_count), dtype=torch.bool)
-    c4 = RNA_ATOM_NAMES.index("C4'")
-    coords[0, 0, c4] = torch.tensor([0.0, 0.0, 0.0])
-    coords[0, 3, c4] = torch.tensor([20.0, 0.0, 0.0])
-    mask[0, [0, 3], c4] = True
-    input_ids = torch.tensor([[1, 3, 3, 2]])  # A C C U, ends can pair.
+def test_structure_loss_updates_trainable_sequence_embedding():
+    config = RhoFoldConfig(
+        d_model=32,
+        pair_dim=16,
+        msa_dim=24,
+        nhead=4,
+        num_e2e_layers=1,
+        num_structure_layers=1,
+        dim_feedforward=64,
+        num_distance_bins=8,
+        recycle_iters=1,
+    )
+    model = RhoFoldModel(config)
+    output = model(torch.tensor([[1, 2, 3, 4]]), return_aux=True)
 
-    loss = secondary_structure_pair_loss(coords, mask, input_ids)
+    output["coords"].pow(2).mean().backward()
 
-    assert loss.item() > 0
+    gradient = model.seq_embedder.embedding.weight.grad
+    assert gradient is not None
+    assert gradient.abs().sum().item() > 0
 
 
-def test_secondary_logits_bce_loss_trains_pairing_head_from_sequence_pairs():
-    logits = torch.zeros((1, 4, 4), requires_grad=True)
-    input_ids = torch.tensor([[1, 3, 3, 2]])  # A C C U
-    padding_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+def test_3d_loss_backpropagates_through_soft_sequence_generation():
+    config = RhoFoldConfig(
+        d_model=32,
+        pair_dim=16,
+        msa_dim=24,
+        nhead=4,
+        num_e2e_layers=2,
+        num_structure_layers=1,
+        dim_feedforward=64,
+        num_distance_bins=8,
+        recycle_iters=1,
+    )
+    model = RhoFoldModel(config)
+    input_ids = torch.tensor([[1, 5, 5, 4]])
+    output = model(input_ids, return_aux=True)
 
-    loss = secondary_logits_bce_loss(logits, input_ids, padding_mask)
-    loss.backward()
+    output["coords"].pow(2).mean().backward()
 
-    assert loss.item() > 0
-    assert logits.grad is not None
-    assert logits.grad.abs().sum().item() > 0
+    generator_gradient = model.sequence_head[-1].weight.grad
+    assert generator_gradient is not None
+    assert generator_gradient.abs().sum().item() > 0
+
+
+def test_known_sequence_positions_are_not_replaced_by_soft_predictions():
+    config = RhoFoldConfig(
+        d_model=16,
+        pair_dim=8,
+        msa_dim=8,
+        nhead=4,
+        num_e2e_layers=1,
+        num_structure_layers=1,
+        dim_feedforward=32,
+    )
+    model = RhoFoldModel(config)
+    input_ids = torch.tensor([[1, 2, 3, 4]])
+    sequence_embedding = model.seq_embedder(input_ids)
+    logits = torch.randn((1, 4, config.vocab_size))
+
+    injected = model.seq_embedder.inject_predicted_bases(sequence_embedding, logits, input_ids)
+
+    assert torch.equal(injected, sequence_embedding)
+
+
+def test_model_learns_relative_sequence_and_structure_loss_weights():
+    model = RhoFoldModel(
+        RhoFoldConfig(
+            d_model=16,
+            pair_dim=8,
+            msa_dim=8,
+            nhead=4,
+            num_e2e_layers=1,
+            num_structure_layers=1,
+            dim_feedforward=32,
+            sequence_loss_initial_weight=0.1,
+        )
+    )
+    structure_weight, sequence_weight = model.learned_task_weights()
+    structure_loss = torch.tensor(2.0, requires_grad=True)
+    sequence_loss = torch.tensor(1.5, requires_grad=True)
+
+    combined = model.combine_task_losses(structure_loss, sequence_loss)
+    combined.backward()
+
+    assert structure_weight.item() == pytest.approx(1.0)
+    assert sequence_weight.item() == pytest.approx(0.1)
+    assert model.task_log_variances.grad is not None
+    assert model.task_log_variances.grad.abs().sum().item() > 0

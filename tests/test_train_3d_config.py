@@ -1,6 +1,14 @@
 import torch
 
-from train_3d import build_scheduler, mixed_precision_enabled, progress_enabled, select_training_device, wandb_enabled
+from train_3d import (
+    build_scheduler,
+    mask_sequence_inputs,
+    mixed_precision_enabled,
+    progress_enabled,
+    select_training_device,
+    sequence_reconstruction_loss,
+    wandb_enabled,
+)
 
 
 def test_select_training_device_uses_configured_cuda_index_when_gpu_available():
@@ -56,3 +64,36 @@ def test_build_scheduler_warms_up_then_decays_learning_rate():
 
     assert lrs[0] < lrs[1]
     assert lrs[-1] < lrs[1]
+
+
+def test_mask_sequence_inputs_can_keep_a_motif_and_mask_the_scaffold():
+    torch.manual_seed(4)
+    input_ids = torch.tensor([[1, 2, 3, 4, 1, 2]])
+    padding_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+
+    masked, selected = mask_sequence_inputs(
+        input_ids,
+        padding_mask,
+        mask_token_id=5,
+        mask_probability=0.0,
+        scaffold_mask_probability=1.0,
+        motif_length=2,
+        training=True,
+    )
+
+    assert selected.sum().item() == 4
+    assert torch.all(masked[selected] == 5)
+    assert torch.equal(masked[~selected], input_ids[~selected])
+
+
+def test_sequence_reconstruction_loss_backpropagates_inside_joint_objective():
+    logits = torch.zeros((1, 3, 6), requires_grad=True)
+    targets = torch.tensor([[1, 2, 3]])
+    selected = torch.tensor([[True, False, True]])
+
+    loss = sequence_reconstruction_loss(logits, targets, selected)
+    loss.backward()
+
+    assert loss.item() > 0
+    assert logits.grad is not None
+    assert logits.grad.abs().sum().item() > 0

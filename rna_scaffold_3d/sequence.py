@@ -2,7 +2,9 @@ from __future__ import annotations
 
 
 RNA_BASE_TO_ID = {"A": 1, "U": 2, "C": 3, "G": 4}
+RNA_ID_TO_BASE = {index: base for base, index in RNA_BASE_TO_ID.items()}
 RNA3D_PAD_ID = 0
+RNA3D_MASK_ID = 5
 
 
 def normalize_rna_sequence(sequence: str) -> str:

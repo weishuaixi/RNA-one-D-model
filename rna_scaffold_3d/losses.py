@@ -195,48 +195,6 @@ def torsion_angle_loss(pred: torch.Tensor, coord_mask: torch.Tensor) -> torch.Te
     return torch.stack(losses).mean() if losses else pred.sum() * 0.0
 
 
-def secondary_structure_pair_loss(
-    pred: torch.Tensor,
-    coord_mask: torch.Tensor,
-    input_ids: torch.Tensor,
-    target_distance: float = 8.0,
-) -> torch.Tensor:
-    if pred.ndim != 4:
-        return pred.sum() * 0.0
-    c4_idx = RNA_ATOM_TO_INDEX["C4'"]
-    losses: list[torch.Tensor] = []
-    for coords, mask, ids in zip(pred, coord_mask, input_ids):
-        n = coords.shape[0]
-        for i in range(n):
-            j = n - 1 - i
-            if i >= j:
-                break
-            if not _can_pair(int(ids[i]), int(ids[j])):
-                continue
-            if not (bool(mask[i, c4_idx]) and bool(mask[j, c4_idx])):
-                continue
-            distance = torch.linalg.norm(coords[i, c4_idx] - coords[j, c4_idx])
-            losses.append(F.relu(distance - target_distance).pow(2))
-    return torch.stack(losses).mean() if losses else pred.sum() * 0.0
-
-
-def secondary_logits_bce_loss(
-    logits: torch.Tensor,
-    input_ids: torch.Tensor,
-    padding_mask: torch.Tensor,
-) -> torch.Tensor:
-    valid = ~padding_mask
-    pair_valid = valid.unsqueeze(2) & valid.unsqueeze(1)
-    labels = torch.zeros_like(logits)
-    for left_id, right_id in ((1, 2), (2, 1), (3, 4), (4, 3), (4, 2), (2, 4)):
-        labels = labels.masked_fill((input_ids == left_id).unsqueeze(2) & (input_ids == right_id).unsqueeze(1), 1.0)
-    eye = torch.eye(logits.size(1), dtype=torch.bool, device=logits.device).unsqueeze(0)
-    pair_valid = pair_valid & ~eye
-    if not pair_valid.any():
-        return logits.sum() * 0.0
-    return F.binary_cross_entropy_with_logits(logits[pair_valid], labels[pair_valid])
-
-
 def plddt_confidence_loss(
     predicted_plddt: torch.Tensor,
     pred: torch.Tensor,
@@ -266,17 +224,6 @@ def _dihedral(p0: torch.Tensor, p1: torch.Tensor, p2: torch.Tensor, p3: torch.Te
     x = (v * w).sum(dim=-1)
     y = (torch.cross(b1, v, dim=-1) * w).sum(dim=-1)
     return torch.atan2(y, x)
-
-
-def _can_pair(left_id: int, right_id: int) -> bool:
-    return (left_id, right_id) in {
-        (1, 2),  # A-U
-        (2, 1),  # U-A
-        (3, 4),  # C-G
-        (4, 3),  # G-C
-        (4, 2),  # G-U wobble
-        (2, 4),  # U-G wobble
-    }
 
 
 # ——— steric clash penalty ———

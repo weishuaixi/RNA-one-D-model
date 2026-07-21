@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 import yaml
 from torch.utils.data import DataLoader, random_split
 from tqdm.auto import tqdm
@@ -18,8 +19,6 @@ from rna_scaffold_3d.losses import (
     masked_pairwise_distance_mse,
     pair_distance_cross_entropy,
     plddt_confidence_loss,
-    secondary_logits_bce_loss,
-    secondary_structure_pair_loss,
     steric_clash_loss,
     torsion_angle_loss,
 )
@@ -93,7 +92,22 @@ def main() -> None:
         print("Using CPU")
     cfg["model"] = normalize_rhofold_config(cfg["model"])
     model = RhoFoldModel(RhoFoldConfig(**cfg["model"])).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["optimizer"]["lr"], weight_decay=cfg["optimizer"].get("weight_decay", 0.0))
+    task_weight_parameters = [model.task_log_variances]
+    network_parameters = [
+        parameter
+        for name, parameter in model.named_parameters()
+        if name != "task_log_variances"
+    ]
+    optimizer = torch.optim.AdamW(
+        [
+            {
+                "params": network_parameters,
+                "weight_decay": cfg["optimizer"].get("weight_decay", 0.0),
+            },
+            {"params": task_weight_parameters, "weight_decay": 0.0},
+        ],
+        lr=cfg["optimizer"]["lr"],
+    )
     accumulate_grad_batches = int(cfg["trainer"].get("accumulate_grad_batches", 1))
     total_steps = max(1, (len(train_loader) + accumulate_grad_batches - 1) // accumulate_grad_batches) * int(cfg["trainer"]["max_epochs"])
     scheduler = build_scheduler(
@@ -110,7 +124,6 @@ def main() -> None:
     bond_weight = float(cfg["optimizer"].get("bond_weight", 0.05))
     angle_weight = float(cfg["optimizer"].get("angle_weight", 0.02))
     torsion_weight = float(cfg["optimizer"].get("torsion_weight", 0.02))
-    secondary_weight = float(cfg["optimizer"].get("secondary_weight", 0.02))
     confidence_weight = float(cfg["optimizer"].get("confidence_weight", 0.01))
 
     checkpoint_dir = Path(cfg["trainer"].get("checkpoint_dir", "checkpoints_3d"))
@@ -128,7 +141,6 @@ def main() -> None:
             "bond": bond_weight,
             "angle": angle_weight,
             "torsion": torsion_weight,
-            "secondary": secondary_weight,
             "confidence": confidence_weight,
         }
         train_loss = _run_epoch(
@@ -163,6 +175,9 @@ def main() -> None:
             "best/val_loss": min(best_val, val_loss),
             "optimizer/lr": optimizer.param_groups[0]["lr"],
         }
+        structure_weight, sequence_weight = model.learned_task_weights()
+        metrics["loss_weight/structure"] = float(structure_weight.detach().cpu())
+        metrics["loss_weight/sequence"] = float(sequence_weight.detach().cpu())
         if val_loss < best_val:
             best_val = val_loss
             checkpoint_path = checkpoint_dir / "rna_3d_best.pt"
@@ -206,10 +221,19 @@ def _run_epoch(
         disable=not show_progress,
     )
     for batch in iterator:
-        input_ids = batch["input_ids"].to(device)
+        target_input_ids = batch["input_ids"].to(device)
         coords = batch["coords"].to(device)
         coord_mask = batch["coord_mask"].to(device)
         padding_mask = batch["padding_mask"].to(device)
+        input_ids, sequence_mask = mask_sequence_inputs(
+            target_input_ids,
+            padding_mask,
+            mask_token_id=model.config.vocab_size - 1,
+            mask_probability=float(trainer_cfg.get("sequence_mask_probability", 0.15)),
+            scaffold_mask_probability=float(trainer_cfg.get("scaffold_mask_probability", 0.25)),
+            motif_length=int(trainer_cfg.get("motif_length", 16)),
+            training=True,
+        )
         with torch.set_grad_enabled(training), torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
             output = model(input_ids=input_ids, padding_mask=padding_mask, return_aux=True)
             pred = output["coords"]
@@ -222,20 +246,23 @@ def _run_epoch(
             bond_loss = bond_length_loss(pred, coord_mask)
             angle_loss = bond_angle_loss(pred, coord_mask)
             torsion_loss = torsion_angle_loss(pred, coord_mask)
-            secondary_loss = secondary_structure_pair_loss(pred, coord_mask, input_ids)
-            secondary_head_loss = secondary_logits_bce_loss(output["secondary_logits"], input_ids, padding_mask)
             confidence_loss = plddt_confidence_loss(output["plddt"], pred, coords, coord_mask)
-            loss = coord_loss
-            loss = loss + loss_weights["coord_mse"] * coord_mse_loss
-            loss = loss + loss_weights["pairwise"] * pairwise_loss
-            loss = loss + loss_weights["pair_ce"] * pair_ce_loss
-            loss = loss + loss_weights["fape"] * frame_loss
-            loss = loss + loss_weights["clash"] * clash_loss
-            loss = loss + loss_weights["bond"] * bond_loss
-            loss = loss + loss_weights["angle"] * angle_loss
-            loss = loss + loss_weights["torsion"] * torsion_loss
-            loss = loss + loss_weights["secondary"] * (secondary_loss + secondary_head_loss)
-            loss = loss + loss_weights["confidence"] * confidence_loss
+            sequence_loss = sequence_reconstruction_loss(
+                output["sequence_logits"],
+                target_input_ids,
+                sequence_mask,
+            )
+            structure_loss = coord_loss
+            structure_loss = structure_loss + loss_weights["coord_mse"] * coord_mse_loss
+            structure_loss = structure_loss + loss_weights["pairwise"] * pairwise_loss
+            structure_loss = structure_loss + loss_weights["pair_ce"] * pair_ce_loss
+            structure_loss = structure_loss + loss_weights["fape"] * frame_loss
+            structure_loss = structure_loss + loss_weights["clash"] * clash_loss
+            structure_loss = structure_loss + loss_weights["bond"] * bond_loss
+            structure_loss = structure_loss + loss_weights["angle"] * angle_loss
+            structure_loss = structure_loss + loss_weights["torsion"] * torsion_loss
+            structure_loss = structure_loss + loss_weights["confidence"] * confidence_loss
+            loss = model.combine_task_losses(structure_loss, sequence_loss)
             if training:
                 scaled_loss = loss / accumulation
                 scaler.scale(scaled_loss).backward()
@@ -264,6 +291,47 @@ def _run_epoch(
         if scheduler is not None:
             scheduler.step()
     return total_loss / max(1, total_batches)
+
+
+def mask_sequence_inputs(
+    input_ids: torch.Tensor,
+    padding_mask: torch.Tensor,
+    mask_token_id: int,
+    mask_probability: float,
+    scaffold_mask_probability: float,
+    motif_length: int,
+    training: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    valid = ~padding_mask
+    if not training:
+        return input_ids, torch.zeros_like(valid)
+
+    masked = input_ids.clone()
+    selected = (torch.rand_like(input_ids, dtype=torch.float32) < mask_probability) & valid
+    for row in range(input_ids.size(0)):
+        valid_length = int(valid[row].sum().item())
+        if valid_length <= 1:
+            continue
+        if torch.rand((), device=input_ids.device).item() < scaffold_mask_probability:
+            keep_length = min(max(1, motif_length), valid_length)
+            start = int(torch.randint(0, valid_length - keep_length + 1, (), device=input_ids.device).item())
+            selected[row, :valid_length] = True
+            selected[row, start : start + keep_length] = False
+        elif not selected[row, :valid_length].any():
+            position = int(torch.randint(0, valid_length, (), device=input_ids.device).item())
+            selected[row, position] = True
+    masked[selected] = mask_token_id
+    return masked, selected
+
+
+def sequence_reconstruction_loss(
+    logits: torch.Tensor,
+    targets: torch.Tensor,
+    selected: torch.Tensor,
+) -> torch.Tensor:
+    if not selected.any():
+        return logits.sum() * 0.0
+    return F.cross_entropy(logits[selected], targets[selected])
 
 
 def select_training_device(trainer_cfg: dict, cuda_available: bool | None = None) -> torch.device:

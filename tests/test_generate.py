@@ -1,4 +1,5 @@
 from rna_scaffold.generate import (
+    RnaTrainingPrior,
     build_auto_masked_scaffold_prompts,
     build_motif_scaffold_sequence,
     build_random_natural_scaffold_result,
@@ -7,32 +8,53 @@ from rna_scaffold.generate import (
 )
 
 
-def test_build_single_best_result_preserves_motif_and_guarantees_complementarity():
+def test_training_prior_smoothing_keeps_all_bases_sampleable():
+    prior = RnaTrainingPrior.from_sequences(["AAAAAAAAAAAA"])
+
+    assert all(probability > 0 for probability in prior.initial.values())
+    assert all(
+        probability > 0
+        for transitions in prior.transition.values()
+        for probability in transitions.values()
+    )
+
+
+def test_build_single_best_result_preserves_motif_and_samples_independent_right_flank():
     result = build_single_best_result(
         motif="AUGCGUACGA",
         left_sequence="AUGCAUGCAU",
         quality_score=0.91,
+        rng_seed=7,
     )
 
     assert result.motif == "AUGCGUACGA"
     assert result.full_sequence == result.left_sequence + result.motif + result.right_sequence
     assert result.motif_preserved
-    assert result.left_right_complementarity >= 0.9
+    assert len(result.right_sequence) == len(result.left_sequence)
+    assert set(result.right_sequence) <= {"A", "U", "C", "G"}
+    assert result.left_right_complementarity < 0.8
 
 
-def test_build_single_best_result_can_create_natural_partial_complementarity():
-    result = build_single_best_result(
+def test_build_single_best_result_does_not_use_mutation_rate_as_complementarity_target():
+    low_mutation = build_single_best_result(
         motif="AUGCGUACGA",
         left_sequence="AUGCAUGCAUAUGCAUGCAU",
         quality_score=0.91,
-        mutation_rate=0.15,
+        mutation_rate=0.0,
+        rng_seed=7,
+    )
+    high_mutation = build_single_best_result(
+        motif="AUGCGUACGA",
+        left_sequence="AUGCAUGCAUAUGCAUGCAU",
+        quality_score=0.91,
+        mutation_rate=0.25,
         rng_seed=7,
     )
 
-    assert result.full_sequence == result.left_sequence + result.motif + result.right_sequence
-    assert result.motif_preserved
-    assert 0.8 <= result.left_right_complementarity <= 0.95
-    assert result.left_right_complementarity < 1.0
+    assert low_mutation.full_sequence == low_mutation.left_sequence + low_mutation.motif + low_mutation.right_sequence
+    assert low_mutation.motif_preserved
+    assert low_mutation.right_sequence == high_mutation.right_sequence
+    assert low_mutation.left_right_complementarity < 0.8
 
 
 def test_build_single_best_result_is_reproducible_with_seed():
@@ -67,7 +89,7 @@ def test_build_random_natural_scaffold_result_samples_length_and_preserves_motif
     assert result.motif_preserved
     assert 12 <= result.left_length <= 20
     assert result.left_length == result.right_length
-    assert 0.75 <= result.left_right_complementarity <= 0.95
+    assert result.right_sequence != result.left_sequence[::-1]
 
 
 def test_build_random_natural_scaffold_result_is_reproducible_with_seed():
@@ -132,6 +154,18 @@ def test_build_motif_scaffold_sequence_returns_full_rna_from_only_motif():
     assert result.motif_preserved
     assert result.left_length > 0
     assert result.right_length > 0
+
+
+def test_build_motif_scaffold_sequence_does_not_force_complementary_flanks():
+    result = build_motif_scaffold_sequence(
+        motif="GCGG",
+        num_candidates=16,
+        min_total_length=40,
+        max_total_length=40,
+        rng_seed=13,
+    )
+
+    assert result.left_right_complementarity < 0.8
 
 
 def test_build_motif_scaffold_sequence_can_use_internal_length_range_without_user_masks():

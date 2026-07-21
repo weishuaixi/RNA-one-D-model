@@ -29,6 +29,7 @@ model:
   msa_dim: 128
   num_distance_bins: 32
   recycle_iters: 2
+  sequence_loss_initial_weight: 0.1
 
 optimizer:
   lr: 0.0002
@@ -43,7 +44,6 @@ optimizer:
   bond_weight: 0.05
   angle_weight: 0.02
   torsion_weight: 0.02
-  secondary_weight: 0.02
   confidence_weight: 0.01
 
 trainer:
@@ -58,3 +58,6 @@ trainer:
   mixed_precision: true
   accumulate_grad_batches: 32
   gradient_clip_norm: 1.0
+  sequence_mask_probability: 0.15
+  scaffold_mask_probability: 0.25
+  motif_length: 16

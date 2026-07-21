@@ -4,9 +4,9 @@
 
 ```text
 fixed motif
-  -> motif-protected 1D scaffold generator
+  -> jointly trained sequence embedding / scaffold head
   -> complete RNA sequence
-  -> locally trained RhoFold-style model
+  -> the same local RhoFold-style model
   -> 3D coordinates / PDB
 ```
 
@@ -15,10 +15,7 @@ fixed motif
 ## 主要文件
 
 ```text
-rna_scaffold/                      # motif scaffold 一维生成和一维训练
-train.py                           # 一维 masked scaffold 训练入口
-configs/train_a800.yaml            # 一维训练配置
-configs/train_stanford_1d.yaml     # Stanford 序列一维训练配置
+rna_scaffold/                      # motif scaffold 输入与生成接口
 
 rna_scaffold_3d/rhofold.py         # 内置 RhoFold-style 3D 模型
 rna_scaffold_3d/data.py            # Stanford RNA 3D / CIF 全原子数据读取
@@ -52,18 +49,12 @@ print(sequence)
 left_sequence + motif + right_sequence
 ```
 
-## 训练一维模型
-
-```bash
-python train.py --config configs/train_a800.yaml
-```
-
-默认一维任务是 `masked_scaffold`：
-
-```text
-input:  <MASK><MASK>...fixed_motif...<MASK><MASK>
-target: original_full_sequence
-```
+一维 scaffold 不再使用 GC、互补率或复杂度等手工惩罚进行训练。`train_3d.py`
+会内部遮盖序列，仅保留部分 motif，将序列重建项与全部三维结构项合并为一个联合目标；
+MASK 位置的 A/U/C/G 概率会转换成软碱基 embedding 后送入三维模块，因此三维损失可以
+直接更新 scaffold head。完整输入序列使用真实碱基 embedding，不会被模型改写。
+序列和结构两个任务使用可学习的不确定性权重；motif 推理默认进行 6 步迭代去噪，
+逐步固定高置信度碱基，并将低置信度位置留到后续步骤重新预测。
 
 ## 训练 3D RhoFold-style 模型
 
@@ -108,7 +99,7 @@ python train_3d.py --config configs/train_3d_local_windows.yaml
 - recycling
 - structure head
 - distogram head
-- secondary-structure head
+- jointly trained sequence reconstruction head
 - pLDDT-like confidence head
 - 27 canonical RNA heavy atoms per residue
 
