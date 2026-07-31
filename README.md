@@ -92,8 +92,8 @@ python train_3d.py --config configs/train_3d_a800_card1.yaml
 python train_3d.py --config configs/train_3d_a800_full.yaml
 ```
 
-两份 A800 配置默认使用第 2 张卡 `cuda:1`。单卡服务器应将 `cuda_device` 改为
-`0`。当 CUDA 不可用或设备编号超出实际卡数时，训练会在读取 mmCIF/构建缓存前
+两份 A800 配置默认使用第 1 张卡 `cuda:0`。如需使用其他显卡，请修改
+`trainer.cuda_device`。当 CUDA 不可用或设备编号超出实际卡数时，训练会在读取 mmCIF/构建缓存前
 立即失败，不会静默退回 CPU。
 
 `train_sequences.v2.csv` 最长序列超过 4000 nt。全通量配置读取到 1536 nt，
