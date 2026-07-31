@@ -9,7 +9,12 @@ from fold_3d import (
     generate_sequence_from_motif,
     save_fold_outputs,
 )
-from rna_scaffold_3d.rhofold import RhoFoldConfig, RhoFoldModel
+from rna_scaffold_3d.rhofold import (
+    RHO_FOLD_ARCHITECTURE_VERSION,
+    RhoFoldConfig,
+    RhoFoldModel,
+)
+from rna_scaffold_3d.rna_atoms import atom_names_for_base
 
 
 def test_generate_sequence_from_motif_returns_complete_one_d_rna():
@@ -33,7 +38,14 @@ def test_fold_sequence_with_checkpoint_uses_local_rhofold_model(tmp_path: Path):
     }
     model = RhoFoldModel(RhoFoldConfig(**config))
     checkpoint_path = tmp_path / "rhofold.pt"
-    torch.save({"model_state_dict": model.state_dict(), "config": {"model": config}}, checkpoint_path)
+    torch.save(
+        {
+            "architecture_version": RHO_FOLD_ARCHITECTURE_VERSION,
+            "model_state_dict": model.state_dict(),
+            "config": {"model": config},
+        },
+        checkpoint_path,
+    )
 
     result = fold_sequence_with_checkpoint("AUGC", checkpoint_path)
 
@@ -56,7 +68,14 @@ def test_fold_motif_with_joint_checkpoint_generates_sequence_then_structure(tmp_
     }
     model = RhoFoldModel(RhoFoldConfig(**config))
     checkpoint_path = tmp_path / "joint_rhofold.pt"
-    torch.save({"model_state_dict": model.state_dict(), "config": {"model": config}}, checkpoint_path)
+    torch.save(
+        {
+            "architecture_version": RHO_FOLD_ARCHITECTURE_VERSION,
+            "model_state_dict": model.state_dict(),
+            "config": {"model": config},
+        },
+        checkpoint_path,
+    )
 
     result = fold_motif_with_checkpoint(
         "GCGG",
@@ -109,7 +128,14 @@ def test_save_fold_outputs_writes_tensor_file_and_complete_pdb(tmp_path: Path):
     }
     model = RhoFoldModel(RhoFoldConfig(**config))
     checkpoint_path = tmp_path / "rhofold.pt"
-    torch.save({"model_state_dict": model.state_dict(), "config": {"model": config}}, checkpoint_path)
+    torch.save(
+        {
+            "architecture_version": RHO_FOLD_ARCHITECTURE_VERSION,
+            "model_state_dict": model.state_dict(),
+            "config": {"model": config},
+        },
+        checkpoint_path,
+    )
     result = fold_sequence_with_checkpoint("AUGC", checkpoint_path)
 
     tensor_path = tmp_path / "fold.pt"
@@ -119,4 +145,5 @@ def test_save_fold_outputs_writes_tensor_file_and_complete_pdb(tmp_path: Path):
     assert tensor_path.exists()
     pdb_text = pdb_path.read_text(encoding="utf-8")
     assert pdb_text.endswith("END\n")
-    assert sum(1 for line in pdb_text.splitlines() if line.startswith("ATOM")) == len(result.sequence) * 27
+    expected_atoms = sum(len(atom_names_for_base(base)) for base in result.sequence)
+    assert sum(1 for line in pdb_text.splitlines() if line.startswith("ATOM")) == expected_atoms

@@ -9,7 +9,11 @@ import torch
 
 from rna_scaffold.generate import build_auto_masked_scaffold_prompts, generate_rna_sequence
 from rna_scaffold.utils import validate_rna_sequence
-from rna_scaffold_3d.rhofold import RhoFoldConfig, RhoFoldModel
+from rna_scaffold_3d.rhofold import (
+    RHO_FOLD_ARCHITECTURE_VERSION,
+    RhoFoldConfig,
+    RhoFoldModel,
+)
 from rna_scaffold_3d.pdb_writer import write_pdb
 from rna_scaffold_3d.sequence import RNA3D_MASK_ID, RNA_ID_TO_BASE, encode_rna_sequence
 
@@ -150,14 +154,45 @@ def _load_model(
     checkpoint_path: str | Path,
     device: str | torch.device,
 ) -> tuple[RhoFoldModel, bool]:
-    checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
+    try:
+        checkpoint = torch.load(str(checkpoint_path), map_location="cpu", weights_only=True)
+    except TypeError:  # PyTorch < 2.0 compatibility
+        checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
     state = checkpoint["model_state_dict"]
+    if checkpoint.get("architecture_version") != RHO_FOLD_ARCHITECTURE_VERSION:
+        raise ValueError(
+            f"Unsupported checkpoint architecture: "
+            f"{checkpoint.get('architecture_version')!r}; expected "
+            f"{RHO_FOLD_ARCHITECTURE_VERSION!r}. Retrain with the current "
+            "CCD geometry and glycosidic-axis chi implementation."
+        )
+    if not any(key.startswith("e2eformer.0.seq_attention.") for key in state):
+        raise ValueError(
+            "This is a legacy collapsed-coordinate checkpoint. It is intentionally "
+            "not loaded into the new frame/triangle architecture with random weights; "
+            "retrain with the updated train_3d.py."
+        )
+    if not any(key.startswith("structure_module.ipa.") for key in state):
+        raise ValueError(
+            "This checkpoint predates the IPA RNA internal-coordinate structure module "
+            "(alpha-zeta/chi, sugar pucker and base orientation); retrain it."
+        )
+    if "structure_module.atom_templates" not in state:
+        raise ValueError(
+            "This checkpoint uses the shared union-atom template. The current model "
+            "requires base-specific A/U/C/G templates; retrain it."
+        )
     model_cfg = dict(checkpoint["config"]["model"])
     model_cfg.pop("type", None)
     model_cfg.setdefault("vocab_size", int(state["seq_embedder.embedding.weight"].shape[0]))
     model = RhoFoldModel(RhoFoldConfig(**model_cfg))
     has_joint_sequence_head = any(key.startswith("sequence_head.") for key in state)
-    model.load_state_dict(state, strict=False)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        raise ValueError(
+            f"Checkpoint architecture mismatch; missing={list(missing)}, "
+            f"unexpected={list(unexpected)}"
+        )
     model.eval()
     model.to(device)
     return model, has_joint_sequence_head

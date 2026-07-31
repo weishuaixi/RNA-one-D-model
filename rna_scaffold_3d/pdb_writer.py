@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 
-from rna_scaffold_3d.rna_atoms import RNA_ATOM_NAMES, RNA_NUM_ATOMS
+from rna_scaffold_3d.rna_atoms import RNA_ATOM_NAMES, RNA_ATOM_TO_INDEX, RNA_NUM_ATOMS, atom_names_for_base
 
 
 def coordinates_to_pdb(
@@ -22,7 +22,8 @@ def coordinates_to_pdb(
     lines: list[str] = []
     serial = 1
     for residue_index, base in enumerate(sequence.upper(), start=1):
-        for atom_index, atom_name in enumerate(RNA_ATOM_NAMES):
+        for atom_name in atom_names_for_base(base):
+            atom_index = RNA_ATOM_TO_INDEX[atom_name]
             x, y, z = [float(value) for value in coords[residue_index - 1, atom_index].tolist()]
             element = atom_name[0] if atom_name[0].isalpha() else "C"
             lines.append(
@@ -45,8 +46,19 @@ def count_pdb_atoms(pdb_text: str) -> int:
     return sum(1 for line in pdb_text.splitlines() if line.startswith("ATOM"))
 
 
-def require_complete_pdb(pdb_text: str, sequence_length: int) -> None:
-    expected_atoms = sequence_length * RNA_NUM_ATOMS
+def require_complete_pdb(
+    pdb_text: str,
+    sequence_length: int | None = None,
+    sequence: str | None = None,
+) -> None:
+    if sequence is not None:
+        expected_atoms = sum(len(atom_names_for_base(base)) for base in sequence)
+        sequence_length = len(sequence)
+    elif sequence_length is not None:
+        # Legacy validation cannot know base-specific atom presence.
+        expected_atoms = sequence_length * RNA_NUM_ATOMS
+    else:
+        raise ValueError("sequence or sequence_length is required.")
     actual_atoms = count_pdb_atoms(pdb_text)
     if actual_atoms != expected_atoms:
         raise ValueError(

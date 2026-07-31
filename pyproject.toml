@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rna-one-d-model"
+version = "0.2.0"
+description = "Joint motif-conditioned RNA sequence and all-atom 3D structure model"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24,<2",
+  "torch>=2.1,<3",
+  "lightning>=2.3",
+  "wandb>=0.17",
+  "pyyaml>=6.0",
+  "tqdm>=4.66",
+  "gemmi>=0.6,<1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.5"]
+
+[project.scripts]
+rna-train-1d = "train:main"
+rna-train-3d = "train_3d:main"
+rna-fold = "fold_3d:main"
+rna-evaluate-3d = "evaluate_3d:main"
+
+[tool.setuptools]
+py-modules = ["train", "train_3d", "fold_3d", "evaluate_3d"]
+
+[tool.setuptools.packages.find]
+include = ["rna_scaffold*", "rna_scaffold_3d*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
