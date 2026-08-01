@@ -823,6 +823,8 @@ def _assemble_cif_rna_atoms_for_rows(
         for atom, candidate in selected_atoms.items():
             atom_coords[(residue, atom)] = candidate["coord"]  # type: ignore[assignment]
 
+    if not residues:
+        return None
     ordered_residues = sorted(residues)
     sequence = "".join(residues[residue] for residue in ordered_residues)
     index_by_residue = {

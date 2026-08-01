@@ -385,6 +385,40 @@ def test_cif_parser_uses_expected_sequence_to_resolve_label_auth_collision(
     )
 
 
+def test_cif_candidate_selection_ignores_alias_without_rna_residues():
+    rows = [
+        {
+            "label_comp_id": "C",
+            "label_atom_id": "P",
+            "label_asym_id": "A",
+            "auth_asym_id": "X",
+            "label_seq_id": "1",
+            "Cartn_x": "1",
+            "Cartn_y": "0",
+            "Cartn_z": "0",
+        },
+        {
+            "label_comp_id": "UNK",
+            "label_atom_id": "P",
+            "label_asym_id": "B",
+            "auth_asym_id": "A",
+            "label_seq_id": "1",
+            "Cartn_x": "2",
+            "Cartn_y": "0",
+            "Cartn_z": "0",
+        },
+    ]
+
+    parsed = _assemble_cif_rna_atoms(
+        rows,
+        "A",
+        expected_sequence="C",
+    )
+
+    assert parsed is not None
+    assert parsed[0] == "C"
+
+
 def test_all_atom_dataset_resolves_label_auth_chain_collision(
     tmp_path: Path,
 ):
