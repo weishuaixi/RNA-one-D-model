@@ -569,6 +569,22 @@ def test_kabsch_and_fape_are_invariant_to_global_rigid_transform():
     assert soft_lddt_loss(pred, target, mask).item() < 1e-4
 
 
+def test_kabsch_loss_promotes_bfloat16_inputs_for_svd_and_backward():
+    torch.manual_seed(105)
+    target = torch.randn(1, 4, RNA_NUM_ATOMS, 3, dtype=torch.bfloat16)
+    pred = (target.float() + 0.1 * torch.randn_like(target.float())).to(torch.bfloat16)
+    pred.requires_grad_()
+    mask = torch.ones(target.shape[:-1], dtype=torch.bool)
+
+    loss = kabsch_aligned_coordinate_loss(pred, target, mask)
+
+    assert loss.dtype == torch.float32
+    assert torch.isfinite(loss)
+    loss.backward()
+    assert pred.grad is not None
+    assert torch.isfinite(pred.grad).all()
+
+
 def test_soft_lddt_loss_penalizes_local_distance_errors_and_is_differentiable():
     target = torch.tensor(
         [[[0.0, 0.0, 0.0], [5.0, 0.0, 0.0], [10.0, 0.0, 0.0]]]
