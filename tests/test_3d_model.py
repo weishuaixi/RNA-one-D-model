@@ -576,7 +576,8 @@ def test_kabsch_loss_promotes_bfloat16_inputs_for_svd_and_backward():
     pred.requires_grad_()
     mask = torch.ones(target.shape[:-1], dtype=torch.bool)
 
-    loss = kabsch_aligned_coordinate_loss(pred, target, mask)
+    with torch.autocast(device_type="cpu", dtype=torch.bfloat16):
+        loss = kabsch_aligned_coordinate_loss(pred, target, mask)
 
     assert loss.dtype == torch.float32
     assert torch.isfinite(loss)

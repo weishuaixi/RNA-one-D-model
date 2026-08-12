@@ -128,10 +128,16 @@ def kabsch_align(
     mask: torch.Tensor,
 ) -> torch.Tensor:
     """Align predicted points to targets independently for every batch item."""
-    if pred.dtype in {torch.float16, torch.bfloat16}:
-        pred = pred.float()
-    if target.dtype in {torch.float16, torch.bfloat16}:
-        target = target.float()
+    with torch.autocast(device_type=pred.device.type, enabled=False):
+        return _kabsch_align_float(pred.float(), target.float(), mask)
+
+
+def _kabsch_align_float(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Run the numerically sensitive Kabsch solve outside mixed precision."""
     aligned = pred.clone()
     for batch_index in range(pred.size(0)):
         valid = mask[batch_index]
