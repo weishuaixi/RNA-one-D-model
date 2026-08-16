@@ -1,0 +1,70 @@
+{
+  "device": "cuda:0",
+  "load_seconds": 0.8549253000001045,
+  "records": [
+    {
+      "target_id": "8i43_A",
+      "sequence": "GGACGCUUUCGAGCCGUCC",
+      "length": 19,
+      "seconds": 1.7432752999993681,
+      "mean_plddt": 55.441688537597656,
+      "min_plddt": 53.96331024169922
+    },
+    {
+      "target_id": "8apo_ED",
+      "sequence": "GCACUGGUUUCAUAAGCCAGC",
+      "length": 21,
+      "seconds": 0.7196835000004285,
+      "mean_plddt": 55.448822021484375,
+      "min_plddt": 53.991634368896484
+    },
+    {
+      "target_id": "8utg_A",
+      "sequence": "UAUGGAAGAGGCGGUUGGUAU",
+      "length": 21,
+      "seconds": 0.6778019000003042,
+      "mean_plddt": 55.57316207885742,
+      "min_plddt": 53.8912239074707
+    },
+    {
+      "target_id": "7sxp_A",
+      "sequence": "UGUGGGAUGGGCGGGUCUGGGA",
+      "length": 22,
+      "seconds": 0.6847266999993735,
+      "mean_plddt": 55.24197769165039,
+      "min_plddt": 53.645992279052734
+    },
+    {
+      "target_id": "9aus_C",
+      "sequence": "GGUUGAAACACGACCUGAGAAA",
+      "length": 22,
+      "seconds": 0.7243650999998863,
+      "mean_plddt": 55.77656173706055,
+      "min_plddt": 54.10829162597656
+    },
+    {
+      "target_id": "8q4o_A",
+      "sequence": "CGGUAGCGGGUAUGGGUCCGGGU",
+      "length": 23,
+      "seconds": 0.7417725999994218,
+      "mean_plddt": 55.250667572021484,
+      "min_plddt": 53.79205322265625
+    },
+    {
+      "target_id": "7ps8_A",
+      "sequence": "CAGGGAGGUGUGGCCUGGGCGGG",
+      "length": 23,
+      "seconds": 0.7579879999993864,
+      "mean_plddt": 55.266483306884766,
+      "min_plddt": 53.79849624633789
+    },
+    {
+      "target_id": "8tns_A",
+      "sequence": "GUGUGUGUGUGUGUGUGUGUGUGU",
+      "length": 24,
+      "seconds": 0.6994744000003266,
+      "mean_plddt": 55.268646240234375,
+      "min_plddt": 53.584171295166016
+    }
+  ]
+}
