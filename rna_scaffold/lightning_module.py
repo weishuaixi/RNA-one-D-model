@@ -8,6 +8,7 @@ except ImportError:  # pragma: no cover
     import pytorch_lightning as L
 
 from rna_scaffold.model import MotifDenoisingTransformer, ScaffoldModelOutput, compute_denoising_losses
+from rna_scaffold.pretrained import build_pretrained_encoder, pretrained_metadata
 
 
 class RnaScaffoldLitModule(L.LightningModule):
@@ -24,6 +25,7 @@ class RnaScaffoldLitModule(L.LightningModule):
         dropout: float = 0.1,
         max_length: int = 512,
         activation_checkpointing: bool = False,
+        pretrained: dict | None = None,
         lr: float = 3e-4,
         weight_decay: float = 0.01,
         length_loss_weight: float = 0.25,
@@ -31,10 +33,12 @@ class RnaScaffoldLitModule(L.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
+        self.pretrained_metadata = pretrained_metadata(pretrained)
         self.lr = lr
         self.weight_decay = weight_decay
         self.length_loss_weight = length_loss_weight
         self.position_loss_weight = position_loss_weight
+        pretrained_encoder = build_pretrained_encoder(pretrained)
         self.model = MotifDenoisingTransformer(
             vocab_size=vocab_size,
             pad_token_id=pad_token_id,
@@ -45,6 +49,7 @@ class RnaScaffoldLitModule(L.LightningModule):
             dropout=dropout,
             max_length=max_length,
             activation_checkpointing=activation_checkpointing,
+            pretrained_encoder=pretrained_encoder,
         )
 
     def forward(
@@ -93,6 +98,9 @@ class RnaScaffoldLitModule(L.LightningModule):
         dataset = getattr(datamodule, "train_dataset", None)
         if hasattr(dataset, "set_epoch"):
             dataset.set_epoch(self.current_epoch)
+
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        checkpoint["pretrained_encoder"] = self.pretrained_metadata
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)

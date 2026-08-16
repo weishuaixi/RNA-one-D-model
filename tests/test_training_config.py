@@ -11,5 +11,7 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
     assert config["model"]["d_model"] >= 768
     assert config["model"]["num_layers"] >= 12
     assert config["model"]["activation_checkpointing"] is True
+    assert config["model"]["pretrained"]["kind"] == "rna_fm"
+    assert config["model"]["pretrained"]["freeze"] is True
     assert config["trainer"]["args"]["precision"] == "bf16-mixed"
     assert config["trainer"]["args"]["accumulate_grad_batches"] >= 2

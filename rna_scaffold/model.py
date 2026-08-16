@@ -71,6 +71,7 @@ class MotifDenoisingTransformer(nn.Module):
         dropout: float = 0.1,
         max_length: int = 512,
         activation_checkpointing: bool = False,
+        pretrained_encoder: nn.Module | None = None,
     ) -> None:
         super().__init__()
         if max_length < 2:
@@ -78,8 +79,14 @@ class MotifDenoisingTransformer(nn.Module):
         self.max_length = max_length
         self.pad_token_id = pad_token_id
         self.activation_checkpointing = activation_checkpointing
+        self.pretrained_encoder = pretrained_encoder
         self.token_embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id)
         self.position_embedding = nn.Embedding(max_length, d_model)
+        self.pretrained_projection = (
+            nn.Linear(int(pretrained_encoder.output_dim), d_model, bias=False)
+            if pretrained_encoder is not None
+            else None
+        )
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
@@ -95,6 +102,14 @@ class MotifDenoisingTransformer(nn.Module):
         self.length_head = nn.Linear(d_model, max_length + 1)
         self.position_head = nn.Linear(d_model, max_length)
         self.confidence_head = nn.Linear(d_model, 1)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.pretrained_encoder is not None and getattr(
+            self.pretrained_encoder, "_rna_scaffold_frozen", False
+        ):
+            self.pretrained_encoder.eval()
+        return self
 
     def forward(
         self,
@@ -113,6 +128,9 @@ class MotifDenoisingTransformer(nn.Module):
             raise ValueError("attention_mask must match input_ids")
         positions = torch.arange(length, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
         hidden = self.token_embedding(input_ids) + self.position_embedding(positions)
+        if self.pretrained_encoder is not None:
+            pretrained_features = self.pretrained_encoder(input_ids, attention_mask)
+            hidden = hidden + self.pretrained_projection(pretrained_features)
         padding_mask = ~attention_mask
         if self.activation_checkpointing and self.training:
             for layer in self.encoder.layers:
