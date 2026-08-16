@@ -26,7 +26,7 @@ def load_config(path: str | Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RNA motif-conditioned scaffold model.")
-    parser.add_argument("--config", default="configs/train_a800.yaml")
+    parser.add_argument("--config", default="configs/train_scaffold_a800.yaml")
     args = parser.parse_args()
 
     cfg = load_config(args.config)

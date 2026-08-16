@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 @dataclass(frozen=True)
@@ -69,12 +70,14 @@ class MotifDenoisingTransformer(nn.Module):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
         max_length: int = 512,
+        activation_checkpointing: bool = False,
     ) -> None:
         super().__init__()
         if max_length < 2:
             raise ValueError("max_length must be at least 2")
         self.max_length = max_length
         self.pad_token_id = pad_token_id
+        self.activation_checkpointing = activation_checkpointing
         self.token_embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id)
         self.position_embedding = nn.Embedding(max_length, d_model)
         layer = nn.TransformerEncoderLayer(
@@ -110,7 +113,19 @@ class MotifDenoisingTransformer(nn.Module):
             raise ValueError("attention_mask must match input_ids")
         positions = torch.arange(length, device=input_ids.device).unsqueeze(0).expand(batch_size, -1)
         hidden = self.token_embedding(input_ids) + self.position_embedding(positions)
-        hidden = self.encoder(hidden, src_key_padding_mask=~attention_mask)
+        padding_mask = ~attention_mask
+        if self.activation_checkpointing and self.training:
+            for layer in self.encoder.layers:
+                hidden = checkpoint(
+                    layer,
+                    hidden,
+                    src_key_padding_mask=padding_mask,
+                    use_reentrant=False,
+                )
+            if self.encoder.norm is not None:
+                hidden = self.encoder.norm(hidden)
+        else:
+            hidden = self.encoder(hidden, src_key_padding_mask=padding_mask)
         hidden = self.final_norm(hidden)
         weights = attention_mask.unsqueeze(-1).to(hidden.dtype)
         pooled = (hidden * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)

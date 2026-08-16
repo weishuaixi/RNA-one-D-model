@@ -23,6 +23,7 @@ class RnaScaffoldLitModule(L.LightningModule):
         dim_feedforward: int = 2048,
         dropout: float = 0.1,
         max_length: int = 512,
+        activation_checkpointing: bool = False,
         lr: float = 3e-4,
         weight_decay: float = 0.01,
         length_loss_weight: float = 0.25,
@@ -43,6 +44,7 @@ class RnaScaffoldLitModule(L.LightningModule):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             max_length=max_length,
+            activation_checkpointing=activation_checkpointing,
         )
 
     def forward(

@@ -85,3 +85,24 @@ def test_denoising_loss_excludes_fixed_motif_positions():
 
     assert torch.allclose(first.base_loss, changed_fixed_target.base_loss)
     assert torch.isfinite(first.total_loss)
+
+
+def test_activation_checkpointing_backward_is_finite():
+    model = MotifDenoisingTransformer(
+        vocab_size=8,
+        pad_token_id=0,
+        d_model=16,
+        nhead=4,
+        num_layers=2,
+        dim_feedforward=32,
+        max_length=16,
+        activation_checkpointing=True,
+    )
+    model.train()
+    output = model(
+        input_ids=torch.tensor([[1, 2, 3, 4, 0]]),
+        attention_mask=torch.tensor([[1, 1, 1, 1, 0]]),
+    )
+    output.token_logits.sum().backward()
+
+    assert all(torch.isfinite(parameter.grad).all() for parameter in model.parameters() if parameter.grad is not None)
