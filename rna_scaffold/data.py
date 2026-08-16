@@ -9,6 +9,8 @@ from torch.utils.data import Dataset
 
 from rna_scaffold.tokenizer import RnaTokenizer
 from rna_scaffold.utils import validate_rna_sequence
+from rna_scaffold.records import RnaSequenceRecord
+from rna_scaffold.splits import SplitManifest, build_family_disjoint_manifest
 
 _RNA_RESIDUE_TO_BASE = {
     "A": "A",
@@ -70,6 +72,127 @@ class MaskedScaffoldExample:
             target_sequence=target,
             fixed_positions=tuple(fixed_positions),
         )
+
+
+@dataclass(frozen=True)
+class MotifScaffoldExample:
+    motif: str
+    target_sequence: str
+    motif_start: int
+
+    @property
+    def motif_end(self) -> int:
+        return self.motif_start + len(self.motif)
+
+    @property
+    def total_length(self) -> int:
+        return len(self.target_sequence)
+
+
+def sample_motif_example(
+    record: RnaSequenceRecord,
+    generator: torch.Generator,
+    min_motif_length: int = 4,
+    max_motif_length: int = 64,
+) -> MotifScaffoldExample:
+    """Sample a reproducible, non-fixed motif while leaving scaffold context."""
+    if min_motif_length < 1:
+        raise ValueError("min_motif_length must be positive")
+    largest = min(max_motif_length, len(record.sequence) - 1)
+    if largest < min_motif_length:
+        raise ValueError("sequence is too short for the requested motif range")
+    motif_length = int(
+        torch.randint(min_motif_length, largest + 1, (1,), generator=generator).item()
+    )
+    motif_start = int(
+        torch.randint(0, len(record.sequence) - motif_length + 1, (1,), generator=generator).item()
+    )
+    motif = record.sequence[motif_start : motif_start + motif_length]
+    return MotifScaffoldExample(motif, record.sequence, motif_start)
+
+
+class RnaMotifDenoisingDataset(Dataset):
+    """Joint left/right scaffold denoising with immutable motif positions."""
+
+    def __init__(
+        self,
+        records: list[RnaSequenceRecord],
+        tokenizer: RnaTokenizer,
+        max_length: int = 512,
+        min_motif_length: int = 4,
+        max_motif_length: int = 64,
+        seed: int = 42,
+        allow_empty: bool = False,
+    ) -> None:
+        self.records = [record for record in records if len(record.sequence) <= max_length]
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.min_motif_length = min_motif_length
+        self.max_motif_length = max_motif_length
+        self.seed = seed
+        self.epoch = 0
+        if not self.records and not allow_empty:
+            raise ValueError("No records fit the denoising dataset length limit")
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = int(epoch)
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        record = self.records[index]
+        generator = torch.Generator().manual_seed(
+            self.seed + self.epoch * max(1, len(self.records)) + index
+        )
+        example = sample_motif_example(
+            record,
+            generator,
+            self.min_motif_length,
+            self.max_motif_length,
+        )
+        length = example.total_length
+        target = torch.full((self.max_length,), self.tokenizer.pad_token_id, dtype=torch.long)
+        target[:length] = torch.tensor(self.tokenizer.encode(example.target_sequence))
+        input_ids = torch.full((self.max_length,), self.tokenizer.pad_token_id, dtype=torch.long)
+        input_ids[:length] = self.tokenizer.token_to_id[self.tokenizer.special.mask]
+        fixed_mask = torch.zeros(self.max_length, dtype=torch.bool)
+        fixed_mask[example.motif_start : example.motif_end] = True
+        input_ids[fixed_mask] = target[fixed_mask]
+        attention_mask = torch.arange(self.max_length) < length
+        return {
+            "input_ids": input_ids,
+            "target_token_ids": target,
+            "fixed_mask": fixed_mask,
+            "attention_mask": attention_mask,
+            "target_length": torch.tensor(length, dtype=torch.long),
+            "motif_start": torch.tensor(example.motif_start, dtype=torch.long),
+        }
+
+
+def build_partitioned_denoising_datasets(
+    records: list[RnaSequenceRecord],
+    tokenizer: RnaTokenizer,
+    max_length: int = 512,
+    min_motif_length: int = 4,
+    max_motif_length: int = 64,
+    seed: int = 42,
+) -> tuple[dict[str, RnaMotifDenoisingDataset], SplitManifest]:
+    manifest = build_family_disjoint_manifest(records, seed=seed)
+    by_id = {record.target_id: record for record in records}
+    datasets = {
+        partition: RnaMotifDenoisingDataset(
+            records=[by_id[target_id] for target_id in manifest.partitions[partition]],
+            tokenizer=tokenizer,
+            max_length=max_length,
+            min_motif_length=min_motif_length,
+            max_motif_length=max_motif_length,
+            seed=seed,
+            allow_empty=True,
+        )
+        for partition in manifest.partitions
+    }
+    return datasets, manifest
 
 
 class RnaScaffoldDataset(Dataset):

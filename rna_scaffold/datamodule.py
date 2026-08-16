@@ -10,7 +10,13 @@ try:
 except ImportError:  # pragma: no cover
     import pytorch_lightning as L
 
-from rna_scaffold.data import RnaMaskedScaffoldDataset, RnaScaffoldDataset, load_sequences
+from rna_scaffold.data import (
+    RnaMaskedScaffoldDataset,
+    RnaScaffoldDataset,
+    build_partitioned_denoising_datasets,
+    load_sequences,
+)
+from rna_scaffold.records import load_sequence_records
 from rna_scaffold.tokenizer import RnaTokenizer
 
 
@@ -22,6 +28,8 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         train_fasta: str | None = None,
         task: str = "flank_scaffold",
         motif_length: int = 32,
+        min_motif_length: int = 4,
+        max_motif_length: int = 64,
         stem_length: int = 64,
         min_flank_length: int = 1,
         max_source_length: int = 128,
@@ -38,6 +46,8 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.tokenizer = tokenizer
         self.task = task
         self.motif_length = motif_length
+        self.min_motif_length = min_motif_length
+        self.max_motif_length = max_motif_length
         self.stem_length = stem_length
         self.min_flank_length = min_flank_length
         self.max_source_length = max_source_length
@@ -48,6 +58,22 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.seed = seed
 
     def setup(self, stage: str | None = None) -> None:
+        if self.task == "motif_denoising":
+            records = load_sequence_records(self.train_data)
+            datasets, self.split_manifest = build_partitioned_denoising_datasets(
+                records=records,
+                tokenizer=self.tokenizer,
+                max_length=self.max_target_length,
+                min_motif_length=self.min_motif_length,
+                max_motif_length=self.max_motif_length,
+                seed=self.seed,
+            )
+            self.train_dataset = datasets["train"]
+            self.val_dataset = datasets["validation"]
+            self.test_dataset = datasets["test"]
+            if not len(self.train_dataset):
+                raise ValueError("Family-disjoint split produced an empty training partition")
+            return
         sequences = load_sequences(self.train_data)
         if self.task == "flank_scaffold":
             examples = RnaScaffoldDataset.examples_from_sequences(
@@ -65,7 +91,9 @@ class RnaScaffoldDataModule(L.LightningDataModule):
             )
             dataset_class = RnaMaskedScaffoldDataset
         else:
-            raise ValueError("task must be either 'flank_scaffold' or 'masked_scaffold'.")
+            raise ValueError(
+                "task must be 'flank_scaffold', 'masked_scaffold', or 'motif_denoising'."
+            )
         if not examples:
             raise ValueError("No valid training examples were built from the training data.")
 
@@ -99,6 +127,16 @@ class RnaScaffoldDataModule(L.LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.val_dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=True,
+        )
+
+    def test_dataloader(self) -> DataLoader:
+        dataset = getattr(self, "test_dataset", self.val_dataset)
+        return DataLoader(
+            dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,

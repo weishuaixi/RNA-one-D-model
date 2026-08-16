@@ -2,11 +2,13 @@ from pathlib import Path
 
 from rna_scaffold.data import (
     MaskedScaffoldExample,
+    RnaMotifDenoisingDataset,
     RnaMaskedScaffoldDataset,
     RnaScaffoldDataset,
     ScaffoldExample,
     load_sequences,
 )
+from rna_scaffold.records import RnaSequenceRecord
 from rna_scaffold.tokenizer import RnaTokenizer
 from rna_scaffold.utils import complementarity_rate, reverse_complement
 
@@ -115,3 +117,28 @@ def test_masked_scaffold_examples_from_sequences_fix_center_motif_by_default():
     assert examples[0].target_sequence == "AAAACCCCUUUU"
     assert examples[0].fixed_sequence == "CCCC"
     assert examples[0].masked_sequence == "<MASK><MASK><MASK><MASK>CCCC<MASK><MASK><MASK><MASK>"
+
+
+def test_denoising_dataset_builds_joint_flank_canvas_and_preserves_motif():
+    tokenizer = RnaTokenizer()
+    record = RnaSequenceRecord("x", "AAAAGCGGUUUU", "RF1", "unit")
+    dataset = RnaMotifDenoisingDataset(
+        records=[record],
+        tokenizer=tokenizer,
+        max_length=32,
+        min_motif_length=4,
+        max_motif_length=6,
+        seed=9,
+    )
+
+    item = dataset[0]
+    motif_positions = item["fixed_mask"].nonzero().flatten()
+
+    assert item["input_ids"].shape == (32,)
+    assert item["attention_mask"].sum().item() == len(record.sequence)
+    assert 4 <= motif_positions.numel() <= 6
+    assert item["input_ids"][motif_positions].tolist() == (
+        item["target_token_ids"][motif_positions].tolist()
+    )
+    assert item["target_length"].item() == len(record.sequence)
+    assert item["motif_start"].item() == motif_positions[0].item()
