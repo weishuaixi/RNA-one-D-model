@@ -142,3 +142,5 @@ def test_denoising_dataset_builds_joint_flank_canvas_and_preserves_motif():
     )
     assert item["target_length"].item() == len(record.sequence)
     assert item["motif_start"].item() == motif_positions[0].item()
+    assert item["target_base_ids"][:4].tolist() == [0, 0, 0, 0]
+    assert item["target_base_ids"][len(record.sequence) :].eq(-100).all()

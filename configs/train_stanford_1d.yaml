@@ -8,26 +8,27 @@ wandb:
 
 data:
   train_data: F:/github_item/stanford-rna-3d-folding-data/train_sequences.csv
-  task: masked_scaffold
-  motif_length: 16
-  stem_length: 128
-  min_flank_length: 8
-  max_source_length: 64
-  max_target_length: 320
-  batch_size: 128
+  task: motif_denoising
+  min_motif_length: 4
+  max_motif_length: 64
+  max_source_length: 512
+  max_target_length: 512
+  batch_size: 16
   num_workers: 8
   val_fraction: 0.05
   seed: 42
 
 model:
-  d_model: 768
-  nhead: 12
-  num_encoder_layers: 8
-  num_decoder_layers: 8
-  dim_feedforward: 3072
+  d_model: 512
+  nhead: 8
+  num_layers: 8
+  dim_feedforward: 2048
   dropout: 0.1
+  max_length: 512
   lr: 0.0003
   weight_decay: 0.01
+  length_loss_weight: 0.25
+  position_loss_weight: 0.25
 
 trainer:
   checkpoint_dir: checkpoints

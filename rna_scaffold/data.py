@@ -154,6 +154,11 @@ class RnaMotifDenoisingDataset(Dataset):
         length = example.total_length
         target = torch.full((self.max_length,), self.tokenizer.pad_token_id, dtype=torch.long)
         target[:length] = torch.tensor(self.tokenizer.encode(example.target_sequence))
+        base_to_class = {"A": 0, "U": 1, "C": 2, "G": 3}
+        target_base_ids = torch.full((self.max_length,), -100, dtype=torch.long)
+        target_base_ids[:length] = torch.tensor(
+            [base_to_class[base] for base in example.target_sequence], dtype=torch.long
+        )
         input_ids = torch.full((self.max_length,), self.tokenizer.pad_token_id, dtype=torch.long)
         input_ids[:length] = self.tokenizer.token_to_id[self.tokenizer.special.mask]
         fixed_mask = torch.zeros(self.max_length, dtype=torch.bool)
@@ -163,6 +168,7 @@ class RnaMotifDenoisingDataset(Dataset):
         return {
             "input_ids": input_ids,
             "target_token_ids": target,
+            "target_base_ids": target_base_ids,
             "fixed_mask": fixed_mask,
             "attention_mask": attention_mask,
             "target_length": torch.tensor(length, dtype=torch.long),
