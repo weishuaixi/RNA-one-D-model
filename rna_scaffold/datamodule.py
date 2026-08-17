@@ -28,10 +28,12 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         train_fasta: str | None = None,
         task: str = "flank_scaffold",
         motif_length: int = 32,
-        min_motif_length: int = 4,
-        max_motif_length: int = 64,
+        min_motif_length: int = 8,
+        max_motif_length: int = 256,
+        motif_length_buckets: list[list[float]] | None = None,
         stem_length: int = 64,
-        min_flank_length: int = 1,
+        min_flank_length: int = 4,
+        min_total_scaffold_length: int = 24,
         max_source_length: int = 128,
         max_target_length: int = 256,
         batch_size: int = 64,
@@ -48,8 +50,10 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.motif_length = motif_length
         self.min_motif_length = min_motif_length
         self.max_motif_length = max_motif_length
+        self.motif_length_buckets = motif_length_buckets
         self.stem_length = stem_length
         self.min_flank_length = min_flank_length
+        self.min_total_scaffold_length = min_total_scaffold_length
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
         self.batch_size = batch_size
@@ -66,11 +70,28 @@ class RnaScaffoldDataModule(L.LightningDataModule):
                 max_length=self.max_target_length,
                 min_motif_length=self.min_motif_length,
                 max_motif_length=self.max_motif_length,
+                motif_length_buckets=self.motif_length_buckets,
+                min_flank_length=self.min_flank_length,
+                min_total_scaffold_length=self.min_total_scaffold_length,
                 seed=self.seed,
             )
             self.train_dataset = datasets["train"]
             self.val_dataset = datasets["validation"]
             self.test_dataset = datasets["test"]
+            eligible_records = sum(len(dataset) for dataset in datasets.values())
+            self.denoising_data_audit = {
+                "input_records": len(records),
+                "eligible_records": eligible_records,
+                "excluded_by_length_or_context": len(records) - eligible_records,
+                "min_motif_length": self.min_motif_length,
+                "max_motif_length": self.max_motif_length,
+                "min_flank_length": self.min_flank_length,
+                "min_total_scaffold_length": self.min_total_scaffold_length,
+            }
+            print(
+                "denoising_data_audit="
+                + ", ".join(f"{key}={value}" for key, value in self.denoising_data_audit.items())
+            )
             if not len(self.train_dataset):
                 raise ValueError("Family-disjoint split produced an empty training partition")
             return

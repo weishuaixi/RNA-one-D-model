@@ -12,6 +12,14 @@ from rna_scaffold.utils import validate_rna_sequence
 from rna_scaffold.records import RnaSequenceRecord
 from rna_scaffold.splits import SplitManifest, build_family_disjoint_manifest
 
+DEFAULT_MOTIF_LENGTH_BUCKETS = (
+    (8, 15, 0.15),
+    (16, 31, 0.30),
+    (32, 63, 0.30),
+    (64, 127, 0.20),
+    (128, 256, 0.05),
+)
+
 _RNA_RESIDUE_TO_BASE = {
     "A": "A",
     "C": "C",
@@ -92,23 +100,61 @@ class MotifScaffoldExample:
 def sample_motif_example(
     record: RnaSequenceRecord,
     generator: torch.Generator,
-    min_motif_length: int = 4,
-    max_motif_length: int = 64,
+    min_motif_length: int = 8,
+    max_motif_length: int = 256,
+    motif_length_buckets: tuple[tuple[int, int, float], ...] | list[list[float]] | None = None,
+    min_flank_length: int = 4,
+    min_total_scaffold_length: int = 24,
 ) -> MotifScaffoldExample:
     """Sample a reproducible, non-fixed motif while leaving scaffold context."""
     if min_motif_length < 1:
         raise ValueError("min_motif_length must be positive")
-    largest = min(max_motif_length, len(record.sequence) - 1)
+    if min_flank_length < 0:
+        raise ValueError("min_flank_length must be non-negative")
+    if min_total_scaffold_length < 0:
+        raise ValueError("min_total_scaffold_length must be non-negative")
+    required_context = max(2 * min_flank_length, min_total_scaffold_length)
+    largest = min(max_motif_length, len(record.sequence) - required_context)
     if largest < min_motif_length:
-        raise ValueError("sequence is too short for the requested motif range")
-    motif_length = int(
-        torch.randint(min_motif_length, largest + 1, (1,), generator=generator).item()
+        raise ValueError("sequence is too short for the requested motif and scaffold context")
+    motif_length = _sample_motif_length(
+        generator,
+        min_motif_length,
+        largest,
+        motif_length_buckets,
     )
+    first_start = min_flank_length
+    last_start = len(record.sequence) - motif_length - min_flank_length
     motif_start = int(
-        torch.randint(0, len(record.sequence) - motif_length + 1, (1,), generator=generator).item()
+        torch.randint(first_start, last_start + 1, (1,), generator=generator).item()
     )
     motif = record.sequence[motif_start : motif_start + motif_length]
     return MotifScaffoldExample(motif, record.sequence, motif_start)
+
+
+def _sample_motif_length(
+    generator: torch.Generator,
+    minimum: int,
+    maximum: int,
+    buckets: tuple[tuple[int, int, float], ...] | list[list[float]] | None,
+) -> int:
+    if not buckets:
+        return int(torch.randint(minimum, maximum + 1, (1,), generator=generator).item())
+    valid: list[tuple[int, int, float]] = []
+    for raw_lower, raw_upper, raw_weight in buckets:
+        lower = max(minimum, int(raw_lower))
+        upper = min(maximum, int(raw_upper))
+        weight = float(raw_weight)
+        if weight < 0:
+            raise ValueError("motif bucket weights must be non-negative")
+        if lower <= upper and weight > 0:
+            valid.append((lower, upper, weight))
+    if not valid:
+        raise ValueError("no motif length bucket overlaps the valid sequence range")
+    weights = torch.tensor([bucket[2] for bucket in valid], dtype=torch.float64)
+    bucket_index = int(torch.multinomial(weights, 1, generator=generator).item())
+    lower, upper, _ = valid[bucket_index]
+    return int(torch.randint(lower, upper + 1, (1,), generator=generator).item())
 
 
 class RnaMotifDenoisingDataset(Dataset):
@@ -119,16 +165,29 @@ class RnaMotifDenoisingDataset(Dataset):
         records: list[RnaSequenceRecord],
         tokenizer: RnaTokenizer,
         max_length: int = 512,
-        min_motif_length: int = 4,
-        max_motif_length: int = 64,
+        min_motif_length: int = 8,
+        max_motif_length: int = 256,
+        motif_length_buckets: tuple[tuple[int, int, float], ...] | list[list[float]] | None = DEFAULT_MOTIF_LENGTH_BUCKETS,
+        min_flank_length: int = 4,
+        min_total_scaffold_length: int = 24,
         seed: int = 42,
         allow_empty: bool = False,
     ) -> None:
-        self.records = [record for record in records if len(record.sequence) <= max_length]
+        required_context = max(2 * min_flank_length, min_total_scaffold_length)
+        self.input_record_count = len(records)
+        self.records = [
+            record
+            for record in records
+            if min_motif_length + required_context <= len(record.sequence) <= max_length
+        ]
+        self.excluded_record_count = self.input_record_count - len(self.records)
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.min_motif_length = min_motif_length
         self.max_motif_length = max_motif_length
+        self.motif_length_buckets = motif_length_buckets
+        self.min_flank_length = min_flank_length
+        self.min_total_scaffold_length = min_total_scaffold_length
         self.seed = seed
         self.epoch = 0
         if not self.records and not allow_empty:
@@ -150,6 +209,9 @@ class RnaMotifDenoisingDataset(Dataset):
             generator,
             self.min_motif_length,
             self.max_motif_length,
+            self.motif_length_buckets,
+            self.min_flank_length,
+            self.min_total_scaffold_length,
         )
         length = example.total_length
         target = torch.full((self.max_length,), self.tokenizer.pad_token_id, dtype=torch.long)
@@ -180,8 +242,11 @@ def build_partitioned_denoising_datasets(
     records: list[RnaSequenceRecord],
     tokenizer: RnaTokenizer,
     max_length: int = 512,
-    min_motif_length: int = 4,
-    max_motif_length: int = 64,
+    min_motif_length: int = 8,
+    max_motif_length: int = 256,
+    motif_length_buckets: tuple[tuple[int, int, float], ...] | list[list[float]] | None = DEFAULT_MOTIF_LENGTH_BUCKETS,
+    min_flank_length: int = 4,
+    min_total_scaffold_length: int = 24,
     seed: int = 42,
 ) -> tuple[dict[str, RnaMotifDenoisingDataset], SplitManifest]:
     manifest = build_family_disjoint_manifest(records, seed=seed)
@@ -193,6 +258,9 @@ def build_partitioned_denoising_datasets(
             max_length=max_length,
             min_motif_length=min_motif_length,
             max_motif_length=max_motif_length,
+            motif_length_buckets=motif_length_buckets,
+            min_flank_length=min_flank_length,
+            min_total_scaffold_length=min_total_scaffold_length,
             seed=seed,
             allow_empty=True,
         )

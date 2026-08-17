@@ -7,10 +7,18 @@ wandb:
   log_model: false
 
 data:
-  train_data: data/train_sequences.csv
+  train_data: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/train_sequences.csv"
   task: motif_denoising
-  min_motif_length: 4
-  max_motif_length: 64
+  min_motif_length: 8
+  max_motif_length: 256
+  motif_length_buckets:
+    - [8, 15, 0.15]
+    - [16, 31, 0.30]
+    - [32, 63, 0.30]
+    - [64, 127, 0.20]
+    - [128, 256, 0.05]
+  min_flank_length: 4
+  min_total_scaffold_length: 24
   max_source_length: 512
   max_target_length: 512
   batch_size: 8
@@ -19,6 +27,7 @@ data:
   seed: 42
 
 model:
+  # OUR MODEL: motif-conditioned RNA scaffold generator (trainable)
   d_model: 768
   nhead: 12
   num_layers: 12
@@ -27,6 +36,7 @@ model:
   max_length: 512
   activation_checkpointing: true
   pretrained:
+    # External frozen feature provider; this is not the scaffold generator.
     kind: rna_fm
     checkpoint:
     freeze: true

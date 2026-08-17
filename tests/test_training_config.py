@@ -7,7 +7,15 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
     config_path = Path(__file__).parents[1] / "configs" / "train_scaffold_a800.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
 
+    assert config["data"]["train_data"].endswith(
+        "igem one-model/stanford-rna-3d-folding-data/train_sequences.csv"
+    )
     assert config["data"]["max_target_length"] == 512
+    assert config["data"]["min_motif_length"] == 8
+    assert config["data"]["max_motif_length"] == 256
+    assert config["data"]["min_flank_length"] == 4
+    assert config["data"]["min_total_scaffold_length"] == 24
+    assert config["data"]["motif_length_buckets"][-1] == [128, 256, 0.05]
     assert config["model"]["d_model"] >= 768
     assert config["model"]["num_layers"] >= 12
     assert config["model"]["activation_checkpointing"] is True

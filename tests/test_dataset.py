@@ -128,6 +128,9 @@ def test_denoising_dataset_builds_joint_flank_canvas_and_preserves_motif():
         max_length=32,
         min_motif_length=4,
         max_motif_length=6,
+        motif_length_buckets=None,
+        min_flank_length=1,
+        min_total_scaffold_length=2,
         seed=9,
     )
 
