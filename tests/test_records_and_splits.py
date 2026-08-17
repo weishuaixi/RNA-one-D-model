@@ -13,11 +13,13 @@ def test_record_normalizes_thymine_and_whitespace():
     assert record.sequence == "AUGCAU"
 
 
-def test_record_rejects_ambiguous_or_too_long_sequences():
+def test_record_rejects_ambiguous_but_accepts_long_canonical_sequences():
     with pytest.raises(ValueError, match="invalid RNA sequence"):
         RnaSequenceRecord("ambiguous", "AUGN", None, "unit")
-    with pytest.raises(ValueError, match="invalid RNA sequence"):
-        RnaSequenceRecord("long", "A" * 513, None, "unit")
+
+    record = RnaSequenceRecord("long", "A" * 4298, None, "unit")
+
+    assert len(record.sequence) == 4298
 
 
 def test_csv_record_loader_keeps_family_and_source_metadata(tmp_path):
@@ -31,6 +33,21 @@ def test_csv_record_loader_keeps_family_and_source_metadata(tmp_path):
     assert load_sequence_records(source) == [
         RnaSequenceRecord("x", "AUGCAU", "RF00001", "Rfam")
     ]
+
+
+def test_csv_loader_can_skip_noncanonical_rows_without_dropping_long_rna(tmp_path):
+    source = tmp_path / "mixed.csv"
+    source.write_text(
+        "target_id,sequence\n"
+        f"long,{'A' * 600}\n"
+        "ambiguous,AUGN\n",
+        encoding="utf-8",
+    )
+
+    records = load_sequence_records(source, skip_invalid=True)
+
+    assert [record.target_id for record in records] == ["long"]
+    assert len(records[0].sequence) == 600
 
 
 def test_family_members_never_cross_partitions():

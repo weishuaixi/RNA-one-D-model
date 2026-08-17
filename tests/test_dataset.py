@@ -147,3 +147,41 @@ def test_denoising_dataset_builds_joint_flank_canvas_and_preserves_motif():
     assert item["motif_start"].item() == motif_positions[0].item()
     assert item["target_base_ids"][:4].tolist() == [0, 0, 0, 0]
     assert item["target_base_ids"][len(record.sequence) :].eq(-100).all()
+
+
+def test_long_rna_is_retained_and_cropped_reproducibly_per_epoch():
+    tokenizer = RnaTokenizer()
+    record = RnaSequenceRecord("long", "A" * 300 + "C" * 300, "RF1", "unit")
+    first = RnaMotifDenoisingDataset(
+        records=[record],
+        tokenizer=tokenizer,
+        max_length=512,
+        min_motif_length=4,
+        max_motif_length=None,
+        motif_length_buckets=None,
+        min_flank_length=2,
+        min_total_scaffold_length=8,
+        preferred_total_scaffold_length=24,
+        seed=17,
+    )
+    second = RnaMotifDenoisingDataset(
+        records=[record],
+        tokenizer=tokenizer,
+        max_length=512,
+        min_motif_length=4,
+        max_motif_length=None,
+        motif_length_buckets=None,
+        min_flank_length=2,
+        min_total_scaffold_length=8,
+        preferred_total_scaffold_length=24,
+        seed=17,
+    )
+
+    first_item = first[0]
+    second_item = second[0]
+    assert len(first) == 1
+    assert first_item["target_length"].item() == 512
+    assert first_item["source_start"].item() == second_item["source_start"].item()
+
+    first.set_epoch(1)
+    assert first[0]["source_start"].item() != first_item["source_start"].item()

@@ -28,12 +28,13 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         train_fasta: str | None = None,
         task: str = "flank_scaffold",
         motif_length: int = 32,
-        min_motif_length: int = 8,
-        max_motif_length: int = 256,
+        min_motif_length: int = 4,
+        max_motif_length: int | None = None,
         motif_length_buckets: list[list[float]] | None = None,
         stem_length: int = 64,
-        min_flank_length: int = 4,
-        min_total_scaffold_length: int = 24,
+        min_flank_length: int = 2,
+        min_total_scaffold_length: int = 8,
+        preferred_total_scaffold_length: int = 24,
         max_source_length: int = 128,
         max_target_length: int = 256,
         batch_size: int = 64,
@@ -54,6 +55,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.stem_length = stem_length
         self.min_flank_length = min_flank_length
         self.min_total_scaffold_length = min_total_scaffold_length
+        self.preferred_total_scaffold_length = preferred_total_scaffold_length
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
         self.batch_size = batch_size
@@ -63,7 +65,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         if self.task == "motif_denoising":
-            records = load_sequence_records(self.train_data)
+            records = load_sequence_records(self.train_data, skip_invalid=True)
             datasets, self.split_manifest = build_partitioned_denoising_datasets(
                 records=records,
                 tokenizer=self.tokenizer,
@@ -73,6 +75,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
                 motif_length_buckets=self.motif_length_buckets,
                 min_flank_length=self.min_flank_length,
                 min_total_scaffold_length=self.min_total_scaffold_length,
+                preferred_total_scaffold_length=self.preferred_total_scaffold_length,
                 seed=self.seed,
             )
             self.train_dataset = datasets["train"]
@@ -87,6 +90,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
                 "max_motif_length": self.max_motif_length,
                 "min_flank_length": self.min_flank_length,
                 "min_total_scaffold_length": self.min_total_scaffold_length,
+                "preferred_total_scaffold_length": self.preferred_total_scaffold_length,
             }
             print(
                 "denoising_data_audit="
