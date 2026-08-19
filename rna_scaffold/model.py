@@ -13,7 +13,6 @@ class ScaffoldModelOutput:
     token_logits: torch.Tensor
     length_logits: torch.Tensor
     position_logits: torch.Tensor
-    confidence: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -101,7 +100,6 @@ class MotifDenoisingTransformer(nn.Module):
         self.token_head = nn.Linear(d_model, 4)
         self.length_head = nn.Linear(d_model, max_length + 1)
         self.position_head = nn.Linear(d_model, max_length)
-        self.confidence_head = nn.Linear(d_model, 1)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -151,5 +149,4 @@ class MotifDenoisingTransformer(nn.Module):
             token_logits=self.token_head(hidden),
             length_logits=self.length_head(pooled),
             position_logits=self.position_head(pooled),
-            confidence=torch.sigmoid(self.confidence_head(hidden).squeeze(-1)),
         )

@@ -8,7 +8,7 @@ from rna_scaffold.model import (
 )
 
 
-def test_model_outputs_tokens_lengths_positions_and_confidence():
+def test_model_outputs_tokens_lengths_and_positions():
     model = MotifDenoisingTransformer(
         vocab_size=12,
         pad_token_id=0,
@@ -27,7 +27,6 @@ def test_model_outputs_tokens_lengths_positions_and_confidence():
     assert output.token_logits.shape == (1, 6, 4)
     assert output.length_logits.shape == (1, 65)
     assert output.position_logits.shape == (1, 64)
-    assert output.confidence.shape == (1, 6)
 
 
 def test_restore_fixed_tokens_never_changes_motif():
@@ -70,7 +69,6 @@ def test_denoising_loss_excludes_fixed_motif_positions():
         token_logits=torch.tensor([[[8.0, 0.0, 0.0, 0.0], [8.0, 0.0, 0.0, 0.0]]]),
         length_logits=torch.zeros(1, 9),
         position_logits=torch.zeros(1, 8),
-        confidence=torch.ones(1, 2),
     )
     common = dict(
         output=output,
