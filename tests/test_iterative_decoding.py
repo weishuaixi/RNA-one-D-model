@@ -31,10 +31,30 @@ def test_select_length_position_masks_impossible_pairs():
         max_length=9,
         generator=torch.Generator().manual_seed(7),
         sample=False,
+        min_scaffold_length=1,
+        min_flank_length=0,
     )
 
     assert total_length == 9
     assert motif_start == 0
+
+
+def test_select_length_position_enforces_scaffold_and_bilateral_flanks():
+    output = DeterministicScaffoldModel()(
+        torch.tensor([[3, 3, 3, 3]]), torch.ones(1, 4, dtype=torch.bool)
+    )
+
+    total_length, motif_start = select_length_position(
+        output,
+        motif_length=4,
+        max_length=8,
+        generator=torch.Generator().manual_seed(7),
+        sample=False,
+        min_scaffold_length=4,
+        min_flank_length=2,
+    )
+
+    assert (total_length, motif_start) == (8, 2)
 
 
 def test_iterative_denoise_is_reproducible_and_preserves_motif():

@@ -24,6 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--denoise-steps", type=int, default=12)
     parser.add_argument("--max-attempt-multiplier", type=int, default=8)
+    parser.add_argument("--min-scaffold-length", type=int, default=8)
+    parser.add_argument("--min-flank-length", type=int, default=2)
     parser.add_argument("--device", default="cpu")
     return parser
 
@@ -39,6 +41,8 @@ def main() -> None:
         top_p=args.top_p,
         denoise_steps=args.denoise_steps,
         max_attempt_multiplier=args.max_attempt_multiplier,
+        min_scaffold_length=args.min_scaffold_length,
+        min_flank_length=args.min_flank_length,
     )
     candidates = generate_candidates(args.checkpoint, args.motif, settings, args.device)
     write_candidates_jsonl(candidates, args.output)

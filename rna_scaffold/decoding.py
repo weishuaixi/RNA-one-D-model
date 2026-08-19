@@ -40,6 +40,8 @@ def select_length_position(
     max_length: int,
     generator: torch.Generator,
     sample: bool = True,
+    min_scaffold_length: int = 1,
+    min_flank_length: int = 0,
 ) -> tuple[int, int]:
     if output.length_logits.shape[0] != 1 or output.position_logits.shape[0] != 1:
         raise ValueError("length/position selection currently requires batch size one")
@@ -49,8 +51,14 @@ def select_length_position(
     scores: list[torch.Tensor] = []
     length_log_probs = output.length_logits[0].float().log_softmax(dim=-1)
     position_log_probs = output.position_logits[0].float().log_softmax(dim=-1)
-    for total_length in range(motif_length + 1, upper + 1):
-        for motif_start in range(total_length - motif_length + 1):
+    if min_scaffold_length < 1 or min_flank_length < 0:
+        raise ValueError("invalid minimum scaffold or flank length")
+    first_length = motif_length + max(min_scaffold_length, 2 * min_flank_length)
+    for total_length in range(first_length, upper + 1):
+        for motif_start in range(
+            min_flank_length,
+            total_length - motif_length - min_flank_length + 1,
+        ):
             pairs.append((total_length, motif_start))
             scores.append(length_log_probs[total_length] + position_log_probs[motif_start])
     if not pairs:

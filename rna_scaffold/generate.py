@@ -116,6 +116,8 @@ class GenerationSettings:
     top_p: float = 0.95
     denoise_steps: int = 12
     max_attempt_multiplier: int = 8
+    min_scaffold_length: int = 8
+    min_flank_length: int = 2
 
     def __post_init__(self) -> None:
         if self.num_candidates <= 0:
@@ -124,6 +126,10 @@ class GenerationSettings:
             raise ValueError("max_length must be at least 5")
         if self.max_attempt_multiplier <= 0:
             raise ValueError("max_attempt_multiplier must be positive")
+        if self.min_scaffold_length < 1:
+            raise ValueError("min_scaffold_length must be positive")
+        if self.min_flank_length < 0:
+            raise ValueError("min_flank_length must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -286,8 +292,9 @@ def generate_candidates(
     settings = settings or GenerationSettings()
     loaded = load_scaffold_checkpoint(checkpoint, device=device)
     maximum = min(settings.max_length, loaded.max_length)
-    if len(motif) >= maximum:
-        raise ValueError("motif must leave at least one scaffold position")
+    required_context = max(settings.min_scaffold_length, 2 * settings.min_flank_length)
+    if len(motif) + required_context > maximum:
+        raise ValueError("motif cannot fit with the required scaffold context")
 
     torch_device = torch.device(device)
     generator = torch.Generator(device=torch_device.type).manual_seed(settings.seed)
@@ -316,6 +323,8 @@ def generate_candidates(
                 max_length=maximum,
                 generator=generator,
                 sample=True,
+                min_scaffold_length=settings.min_scaffold_length,
+                min_flank_length=settings.min_flank_length,
             )
             decoded = iterative_denoise(
                 loaded.model.model,
