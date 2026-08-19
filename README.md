@@ -30,7 +30,9 @@ rna_scaffold/datamodule.py        # Lightning 数据模块
 rna_scaffold/lightning_module.py  # 一维 Transformer 训练模块
 rna_scaffold/model.py             # 联合去噪生成器及长度/位置预测头
 rna_scaffold/pretrained.py        # 可选 RNA-FM 特征编码器
-rna_scaffold/generate.py          # 支架生成接口（正在升级为 checkpoint 推理）
+rna_scaffold/generate.py          # checkpoint推理、迭代去噪和显式Markov baseline
+rna_scaffold/validators/rnafold.py # 可选RNAfold外部验证适配器
+rna_scaffold/evaluation.py        # benchmark指标与bootstrap统计
 rna_scaffold/tokenizer.py         # RNA 与控制 token
 train.py                          # 一维模型训练入口
 configs/train_stanford_1d.yaml    # 一维训练配置
@@ -55,10 +57,42 @@ A800 配置冻结官方 RNA-FM，将其 12 层编码器产生的 640 维逐碱�
 仍由本项目的生成模型学习。若服务器已手动下载权重，可在配置中的
 `model.pretrained.checkpoint` 填入权重路径，以便记录权重 SHA-256。
 
+正式生成必须提供训练后的checkpoint；程序不会在checkpoint缺失时退回随机或
+Markov结果：
+
+```bash
+python generate_scaffold.py \
+  --motif GCGG \
+  --checkpoint checkpoints_scaffold_a800_mmseqs80/best.ckpt \
+  --num-candidates 256 \
+  --max-length 512 \
+  --seed 42 \
+  --output outputs/GCGG_candidates.jsonl
+```
+
+可选RNAfold验证与多指标重排：
+
+```bash
+python validate_scaffolds.py \
+  --input outputs/GCGG_candidates.jsonl \
+  --output outputs/GCGG_validated.jsonl
+```
+
+统一预算的baseline与消融：
+
+```bash
+python benchmark_scaffolds.py \
+  --config configs/benchmark_scaffolds.yaml
+```
+
+`generate_markov_baseline()` 仅用于明确标注的对照实验，不属于正式模型推理。
+
 完整重构目标、数据防泄漏方案、生成架构、外部验证边界和 Benchmark 定义见：
 
 - `docs/superpowers/specs/2026-08-15-scaffold-generator-redesign.md`
 - `docs/superpowers/plans/2026-08-15-scaffold-generator-redesign.md`
+- `docs/superpowers/specs/2026-08-19-scaffold-generation-completion-design.md`
+- `docs/superpowers/plans/2026-08-19-scaffold-generation-completion.md`
 
 ## 设计原则
 

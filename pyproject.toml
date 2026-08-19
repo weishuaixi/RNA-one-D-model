@@ -22,9 +22,12 @@ rnafm = ["rna-fm"]
 
 [project.scripts]
 rna-train-1d = "train:main"
+rna-generate-scaffold = "generate_scaffold:main"
+rna-validate-scaffolds = "validate_scaffolds:main"
+rna-benchmark-scaffolds = "benchmark_scaffolds:main"
 
 [tool.setuptools]
-py-modules = ["train"]
+py-modules = ["train", "generate_scaffold", "validate_scaffolds", "benchmark_scaffolds"]
 
 [tool.setuptools.packages.find]
 include = ["rna_scaffold*"]
