@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 import torch
@@ -105,6 +106,48 @@ class MaskedScaffoldPrompt:
     total_length: int
 
 
+@dataclass(frozen=True)
+class GenerationSettings:
+    num_candidates: int = 256
+    max_length: int = 512
+    seed: int = 42
+    temperature: float = 1.0
+    top_k: int | None = None
+    top_p: float = 0.95
+    denoise_steps: int = 12
+    max_attempt_multiplier: int = 8
+
+    def __post_init__(self) -> None:
+        if self.num_candidates <= 0:
+            raise ValueError("num_candidates must be positive")
+        if self.max_length < 5:
+            raise ValueError("max_length must be at least 5")
+        if self.max_attempt_multiplier <= 0:
+            raise ValueError("max_attempt_multiplier must be positive")
+
+
+@dataclass(frozen=True)
+class ScaffoldCandidate:
+    candidate_id: str
+    full_sequence: str
+    left_sequence: str
+    motif: str
+    right_sequence: str
+    motif_start: int
+    motif_end: int
+    total_length: int
+    normalized_log_probability: float
+    checkpoint_sha256: str
+    seed: int
+    gc_fraction: float
+    max_homopolymer: int
+    base_entropy: float
+    motif_preserved: bool
+    valid: bool
+    status: str
+    generation_settings: dict = field(default_factory=dict)
+
+
 def build_auto_masked_scaffold_prompts(
     motif: str,
     num_candidates: int = 16,
@@ -193,23 +236,172 @@ def build_motif_scaffold_sequence(
     return _make_scaffold_result(motif, left_sequence, right_sequence, quality_score=0.0)
 
 
-def generate_rna_sequence(
+def generate_markov_baseline(
     motif: str,
-    num_candidates: int = 128,
+    train_data: str | Path | None = None,
+    seed: int = 42,
     min_total_length: int | None = None,
     max_total_length: int | None = None,
-    rng_seed: int | None = None,
-    train_data: str | Path | None = None,
-) -> str:
-    """Generate one complete RNA sequence from a fixed RNA motif."""
+) -> ScaffoldResult:
+    """Explicit first-order Markov baseline; never used as model fallback."""
     return build_motif_scaffold_sequence(
         motif=motif,
-        num_candidates=num_candidates,
+        num_candidates=1,
         min_total_length=min_total_length,
         max_total_length=max_total_length,
-        rng_seed=rng_seed,
+        rng_seed=seed,
         train_data=train_data,
-    ).full_sequence
+    )
+
+
+def _sequence_metrics(sequence: str) -> tuple[float, int, float]:
+    counts = Counter(sequence)
+    gc_fraction = (counts["G"] + counts["C"]) / len(sequence)
+    maximum_run = 1
+    current_run = 1
+    for previous, current in zip(sequence, sequence[1:]):
+        current_run = current_run + 1 if current == previous else 1
+        maximum_run = max(maximum_run, current_run)
+    entropy = 0.0
+    for base in BASES:
+        probability = counts[base] / len(sequence)
+        if probability:
+            entropy -= probability * math.log2(probability)
+    return gc_fraction, maximum_run, entropy
+
+
+def generate_candidates(
+    checkpoint: str | Path,
+    motif: str,
+    settings: GenerationSettings | None = None,
+    device: str | torch.device = "cpu",
+) -> list[ScaffoldCandidate]:
+    """Generate unique motif-preserving candidates with the learned checkpoint."""
+    from rna_scaffold.checkpoints import load_scaffold_checkpoint
+    from rna_scaffold.decoding import DecodingSettings, iterative_denoise, select_length_position
+
+    motif = motif.strip().upper().replace("T", "U")
+    if len(motif) < 4 or not validate_rna_sequence(motif):
+        raise ValueError("motif must contain at least four A/U/C/G nucleotides")
+    settings = settings or GenerationSettings()
+    loaded = load_scaffold_checkpoint(checkpoint, device=device)
+    maximum = min(settings.max_length, loaded.max_length)
+    if len(motif) >= maximum:
+        raise ValueError("motif must leave at least one scaffold position")
+
+    torch_device = torch.device(device)
+    generator = torch.Generator(device=torch_device.type).manual_seed(settings.seed)
+    motif_input = torch.tensor(
+        [loaded.tokenizer.encode(motif)], dtype=torch.long, device=torch_device
+    )
+    motif_attention = torch.ones_like(motif_input, dtype=torch.bool)
+    decoding_settings = DecodingSettings(
+        denoise_steps=settings.denoise_steps,
+        temperature=settings.temperature,
+        top_k=settings.top_k,
+        top_p=settings.top_p,
+    )
+    candidates: list[ScaffoldCandidate] = []
+    seen: set[str] = set()
+    max_attempts = settings.num_candidates * settings.max_attempt_multiplier
+    loaded.model.eval()
+    with torch.inference_mode():
+        placement_output = loaded.model(motif_input, motif_attention)
+        for _ in range(max_attempts):
+            if len(candidates) >= settings.num_candidates:
+                break
+            total_length, motif_start = select_length_position(
+                placement_output,
+                motif_length=len(motif),
+                max_length=maximum,
+                generator=generator,
+                sample=True,
+            )
+            decoded = iterative_denoise(
+                loaded.model.model,
+                loaded.tokenizer,
+                motif,
+                total_length,
+                motif_start,
+                decoding_settings,
+                generator,
+                device=torch_device,
+            )
+            if decoded.sequence in seen:
+                continue
+            seen.add(decoded.sequence)
+            motif_end = motif_start + len(motif)
+            preserved = decoded.sequence[motif_start:motif_end] == motif
+            valid = preserved and validate_rna_sequence(decoded.sequence)
+            gc_fraction, maximum_run, entropy = _sequence_metrics(decoded.sequence)
+            candidates.append(
+                ScaffoldCandidate(
+                    candidate_id=f"candidate_{len(candidates) + 1:04d}",
+                    full_sequence=decoded.sequence,
+                    left_sequence=decoded.sequence[:motif_start],
+                    motif=motif,
+                    right_sequence=decoded.sequence[motif_end:],
+                    motif_start=motif_start,
+                    motif_end=motif_end,
+                    total_length=total_length,
+                    normalized_log_probability=decoded.normalized_log_probability,
+                    checkpoint_sha256=loaded.checkpoint_sha256,
+                    seed=settings.seed,
+                    gc_fraction=gc_fraction,
+                    max_homopolymer=maximum_run,
+                    base_entropy=entropy,
+                    motif_preserved=preserved,
+                    valid=valid,
+                    status="ok" if valid else "invalid",
+                    generation_settings=asdict(settings),
+                )
+            )
+    if len(candidates) < settings.num_candidates:
+        candidates = [
+            candidate
+            if candidate.status != "ok"
+            else ScaffoldCandidate(**{**asdict(candidate), "status": "shortfall"})
+            for candidate in candidates
+        ]
+    return candidates
+
+
+def generate_rna_sequence(
+    motif: str,
+    checkpoint: str | Path,
+    device: str | torch.device = "cpu",
+    **settings,
+) -> str:
+    """Return the highest-likelihood sequence from a trained checkpoint."""
+    candidates = generate_candidates(
+        checkpoint=checkpoint,
+        motif=motif,
+        settings=GenerationSettings(**settings),
+        device=device,
+    )
+    if not candidates:
+        raise RuntimeError("generation produced no valid unique candidates")
+    return max(candidates, key=lambda candidate: candidate.normalized_log_probability).full_sequence
+
+
+def write_candidates_jsonl(candidates: list[ScaffoldCandidate], output: str | Path) -> None:
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        for candidate in candidates:
+            handle.write(json.dumps(asdict(candidate), ensure_ascii=False, sort_keys=True) + "\n")
+    temporary.replace(output_path)
+
+
+def write_candidates_fasta(candidates: list[ScaffoldCandidate], output: str | Path) -> None:
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        for candidate in candidates:
+            handle.write(f">{candidate.candidate_id}\n{candidate.full_sequence}\n")
+    temporary.replace(output_path)
 
 
 def build_single_best_result(

@@ -1,11 +1,14 @@
 from rna_scaffold.generate import (
+    GenerationSettings,
     RnaTrainingPrior,
     build_auto_masked_scaffold_prompts,
     build_motif_scaffold_sequence,
     build_random_natural_scaffold_result,
     build_single_best_result,
     generate_rna_sequence,
+    generate_markov_baseline,
 )
+import pytest
 
 
 def test_training_prior_smoothing_keeps_all_bases_sampleable():
@@ -181,20 +184,12 @@ def test_build_motif_scaffold_sequence_can_use_internal_length_range_without_use
     assert result.full_sequence.count("AUGCGU") == 1
 
 
-def test_generate_rna_sequence_returns_only_full_sequence_string_from_motif():
-    sequence = generate_rna_sequence(
-        motif="GCGG",
-        num_candidates=16,
-        rng_seed=31,
-    )
-
-    assert isinstance(sequence, str)
-    assert set(sequence).issubset({"A", "U", "C", "G"})
-    assert "GCGG" in sequence
-    assert "<MASK>" not in sequence
+def test_generate_rna_sequence_requires_checkpoint():
+    with pytest.raises(TypeError):
+        generate_rna_sequence(motif="GCGG")
 
 
-def test_generate_rna_sequence_can_follow_training_length_distribution_without_user_masks(tmp_path):
+def test_markov_baseline_can_follow_training_length_distribution(tmp_path):
     train_csv = tmp_path / "train_sequences.csv"
     train_csv.write_text(
         "target_id,sequence\n"
@@ -203,13 +198,17 @@ def test_generate_rna_sequence_can_follow_training_length_distribution_without_u
         encoding="utf-8",
     )
 
-    sequence = generate_rna_sequence(
+    result = generate_markov_baseline(
         motif="GCGG",
-        num_candidates=8,
-        rng_seed=4,
         train_data=train_csv,
+        seed=4,
     )
 
-    assert len(sequence) == 24
-    assert "GCGG" in sequence
-    assert "<MASK>" not in sequence
+    assert len(result.full_sequence) == 24
+    assert "GCGG" in result.full_sequence
+    assert "<MASK>" not in result.full_sequence
+
+
+def test_generation_settings_reject_invalid_sampling_values():
+    with pytest.raises(ValueError, match="num_candidates"):
+        GenerationSettings(num_candidates=0)
