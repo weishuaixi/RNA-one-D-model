@@ -1,0 +1,28 @@
+seed: 42
+candidate_count: 16
+motifs:
+  - id: motif_gugg
+    sequence: GCGG
+  - id: motif_augg
+    sequence: AUGCGA
+methods:
+  - uniform
+  - markov
+  # Add trained ablations with equal budgets, for example:
+  # - name: complete_rnafm
+  #   kind: checkpoint
+  #   checkpoint: checkpoints_scaffold_a800_mmseqs80/best.ckpt
+  #   device: cuda
+  #   generation: {denoise_steps: 12, top_p: 0.95}
+  # - name: no_rnafm
+  #   kind: checkpoint
+  #   checkpoint: checkpoints_scaffold_no_rnafm/best.ckpt
+  # - name: single_pass
+  #   kind: checkpoint
+  #   checkpoint: checkpoints_scaffold_a800_mmseqs80/best.ckpt
+  #   generation: {denoise_steps: 1}
+training_data:
+rnafold:
+  enabled: false
+  executable: RNAfold
+output_dir: outputs/scaffold_benchmark
