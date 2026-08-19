@@ -3,7 +3,7 @@ import torch
 
 pytest.importorskip("lightning.pytorch")
 
-from rna_scaffold.lightning_module import RnaScaffoldLitModule
+from rna_scaffold.lightning_module import RnaScaffoldLitModule, compact_fixed_motifs
 from rna_scaffold.tokenizer import RnaTokenizer
 
 
@@ -33,3 +33,20 @@ def test_lightning_module_returns_finite_joint_denoising_loss():
 
     assert set(output) >= {"loss", "base_loss", "length_loss", "position_loss", "token_accuracy"}
     assert torch.isfinite(output["loss"])
+
+
+def test_compact_fixed_motifs_removes_flank_length_and_position_leakage():
+    input_ids = torch.tensor(
+        [[3, 8, 11, 10, 3, 3], [3, 3, 9, 8, 11, 3]]
+    )
+    fixed_mask = torch.tensor(
+        [
+            [False, True, True, True, False, False],
+            [False, False, True, True, True, False],
+        ]
+    )
+
+    motifs, attention = compact_fixed_motifs(input_ids, fixed_mask, pad_token_id=0)
+
+    assert motifs.tolist() == [[8, 11, 10], [9, 8, 11]]
+    assert attention.tolist() == [[True, True, True], [True, True, True]]

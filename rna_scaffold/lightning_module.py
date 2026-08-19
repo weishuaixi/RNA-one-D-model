@@ -33,6 +33,32 @@ def warmup_cosine_multiplier(
     return min_fraction + (1.0 - min_fraction) * cosine
 
 
+def compact_fixed_motifs(
+    input_ids: torch.Tensor,
+    fixed_mask: torch.Tensor,
+    pad_token_id: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack immutable motif tokens so placement heads cannot read target geometry."""
+    if input_ids.shape != fixed_mask.shape or input_ids.ndim != 2:
+        raise ValueError("input_ids and fixed_mask must have equal [batch, length] shapes")
+    lengths = fixed_mask.long().sum(dim=1)
+    if torch.any(lengths <= 0):
+        raise ValueError("every item must contain a non-empty fixed motif")
+    maximum = int(lengths.max().item())
+    motifs = torch.full(
+        (input_ids.shape[0], maximum),
+        int(pad_token_id),
+        dtype=input_ids.dtype,
+        device=input_ids.device,
+    )
+    attention = torch.zeros_like(motifs, dtype=torch.bool)
+    for batch_index in range(input_ids.shape[0]):
+        motif = input_ids[batch_index, fixed_mask[batch_index].bool()]
+        motifs[batch_index, : motif.numel()] = motif
+        attention[batch_index, : motif.numel()] = True
+    return motifs, attention
+
+
 class RnaScaffoldLitModule(L.LightningModule):
     """Lightning training wrapper for motif-protected scaffold denoising."""
 
@@ -59,6 +85,7 @@ class RnaScaffoldLitModule(L.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.pretrained_metadata = pretrained_metadata(pretrained)
+        self.pad_token_id = int(pad_token_id)
         self.lr = lr
         self.weight_decay = weight_decay
         self.length_loss_weight = length_loss_weight
@@ -88,7 +115,16 @@ class RnaScaffoldLitModule(L.LightningModule):
         return self.model(input_ids=input_ids, attention_mask=attention_mask)
 
     def _step(self, batch: dict[str, torch.Tensor], stage: str) -> dict[str, torch.Tensor]:
-        output = self(batch["input_ids"], batch["attention_mask"])
+        scaffold_output = self(batch["input_ids"], batch["attention_mask"])
+        motif_ids, motif_attention = compact_fixed_motifs(
+            batch["input_ids"], batch["fixed_mask"], self.pad_token_id
+        )
+        placement_output = self(motif_ids, motif_attention)
+        output = ScaffoldModelOutput(
+            token_logits=scaffold_output.token_logits,
+            length_logits=placement_output.length_logits,
+            position_logits=placement_output.position_logits,
+        )
         losses = compute_denoising_losses(
             output=output,
             target_base_ids=batch["target_base_ids"],
