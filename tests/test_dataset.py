@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import torch
+
 from rna_scaffold.data import (
     MaskedScaffoldExample,
     RnaMotifDenoisingDataset,
@@ -185,3 +187,67 @@ def test_long_rna_is_retained_and_cropped_reproducibly_per_epoch():
 
     first.set_epoch(1)
     assert first[0]["source_start"].item() != first_item["source_start"].item()
+
+
+def test_denoising_corruption_masks_only_prediction_positions():
+    tokenizer = RnaTokenizer()
+    record = RnaSequenceRecord("x", "AUGC" * 20, "RF1", "unit")
+    dataset = RnaMotifDenoisingDataset(
+        [record],
+        tokenizer,
+        max_length=80,
+        min_motif_length=8,
+        max_motif_length=8,
+        full_mask_probability=0.0,
+        span_mask_probability=0.0,
+        min_random_mask_fraction=0.5,
+        max_random_mask_fraction=0.5,
+        seed=9,
+    )
+    item = dataset[0]
+    scaffold = item["attention_mask"] & ~item["fixed_mask"]
+
+    assert item["prediction_mask"].any()
+    assert (scaffold & ~item["prediction_mask"]).any()
+    assert torch.all(
+        item["input_ids"][item["prediction_mask"]]
+        == tokenizer.token_to_id[tokenizer.special.mask]
+    )
+    assert torch.equal(
+        item["input_ids"][item["fixed_mask"]],
+        item["target_token_ids"][item["fixed_mask"]],
+    )
+
+
+def test_full_mask_corruption_matches_inference_canvas():
+    tokenizer = RnaTokenizer()
+    record = RnaSequenceRecord("x", "AUGC" * 10, "RF1", "unit")
+    dataset = RnaMotifDenoisingDataset(
+        [record],
+        tokenizer,
+        max_length=40,
+        full_mask_probability=1.0,
+        span_mask_probability=0.0,
+        seed=3,
+    )
+    item = dataset[0]
+    scaffold = item["attention_mask"] & ~item["fixed_mask"]
+
+    assert torch.equal(item["prediction_mask"], scaffold)
+
+
+def test_span_corruption_contains_adjacent_masked_positions():
+    tokenizer = RnaTokenizer()
+    record = RnaSequenceRecord("x", "AUGC" * 20, "RF1", "unit")
+    dataset = RnaMotifDenoisingDataset(
+        [record],
+        tokenizer,
+        max_length=80,
+        full_mask_probability=0.0,
+        span_mask_probability=1.0,
+        mean_span_length=6,
+        seed=5,
+    )
+    prediction = dataset[0]["prediction_mask"]
+
+    assert (prediction[:-1] & prediction[1:]).any()

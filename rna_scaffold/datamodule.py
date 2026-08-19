@@ -35,6 +35,11 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         min_flank_length: int = 2,
         min_total_scaffold_length: int = 8,
         preferred_total_scaffold_length: int = 24,
+        full_mask_probability: float = 0.35,
+        span_mask_probability: float = 0.35,
+        min_random_mask_fraction: float = 0.30,
+        max_random_mask_fraction: float = 0.80,
+        mean_span_length: int = 8,
         max_source_length: int = 128,
         max_target_length: int = 256,
         batch_size: int = 64,
@@ -56,6 +61,11 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.min_flank_length = min_flank_length
         self.min_total_scaffold_length = min_total_scaffold_length
         self.preferred_total_scaffold_length = preferred_total_scaffold_length
+        self.full_mask_probability = full_mask_probability
+        self.span_mask_probability = span_mask_probability
+        self.min_random_mask_fraction = min_random_mask_fraction
+        self.max_random_mask_fraction = max_random_mask_fraction
+        self.mean_span_length = mean_span_length
         self.max_source_length = max_source_length
         self.max_target_length = max_target_length
         self.batch_size = batch_size
@@ -76,6 +86,11 @@ class RnaScaffoldDataModule(L.LightningDataModule):
                 min_flank_length=self.min_flank_length,
                 min_total_scaffold_length=self.min_total_scaffold_length,
                 preferred_total_scaffold_length=self.preferred_total_scaffold_length,
+                full_mask_probability=self.full_mask_probability,
+                span_mask_probability=self.span_mask_probability,
+                min_random_mask_fraction=self.min_random_mask_fraction,
+                max_random_mask_fraction=self.max_random_mask_fraction,
+                mean_span_length=self.mean_span_length,
                 seed=self.seed,
             )
             self.train_dataset = datasets["train"]

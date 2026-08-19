@@ -30,15 +30,22 @@ def compute_denoising_losses(
     attention_mask: torch.Tensor,
     target_length: torch.Tensor,
     motif_start: torch.Tensor,
+    prediction_mask: torch.Tensor | None = None,
     length_loss_weight: float = 0.25,
     position_loss_weight: float = 0.25,
+    label_smoothing: float = 0.0,
 ) -> DenoisingLosses:
-    scaffold_mask = attention_mask.bool() & ~fixed_mask.bool()
+    scaffold_mask = (
+        prediction_mask.bool()
+        if prediction_mask is not None
+        else attention_mask.bool() & ~fixed_mask.bool()
+    )
     if not scaffold_mask.any():
         raise ValueError("every batch must contain at least one scaffold position")
     base_loss = F.cross_entropy(
         output.token_logits[scaffold_mask],
         target_base_ids[scaffold_mask],
+        label_smoothing=label_smoothing,
     )
     length_loss = F.cross_entropy(output.length_logits, target_length.long())
     position_loss = F.cross_entropy(output.position_logits, motif_start.long())

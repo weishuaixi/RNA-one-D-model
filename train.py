@@ -7,11 +7,11 @@ import yaml
 
 try:
     import lightning.pytorch as L
-    from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
+    from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
     from lightning.pytorch.loggers import WandbLogger
 except ImportError:  # pragma: no cover
     import pytorch_lightning as L
-    from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
+    from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
     from pytorch_lightning.loggers import WandbLogger
 
 from rna_scaffold.datamodule import RnaScaffoldDataModule
@@ -27,6 +27,7 @@ def load_config(path: str | Path) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RNA motif-conditioned scaffold model.")
     parser.add_argument("--config", default="configs/train_scaffold_a800.yaml")
+    parser.add_argument("--resume", help="Resume from an existing Lightning checkpoint.")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -47,6 +48,13 @@ def main() -> None:
         mode="min",
         save_top_k=3,
         save_last=True,
+        auto_insert_metric_name=False,
+    )
+    early_stopping = EarlyStopping(
+        monitor="val/loss",
+        mode="min",
+        patience=int(cfg["trainer"].get("early_stopping_patience", 12)),
+        check_finite=True,
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
     logger = WandbLogger(
@@ -59,10 +67,11 @@ def main() -> None:
 
     trainer = L.Trainer(
         logger=logger,
-        callbacks=[checkpoint, lr_monitor],
+        callbacks=[checkpoint, early_stopping, lr_monitor],
         **cfg["trainer"]["args"],
     )
-    trainer.fit(model, datamodule=data)
+    resume = args.resume or cfg["trainer"].get("resume_from_checkpoint")
+    trainer.fit(model, datamodule=data, ckpt_path=resume)
 
 
 if __name__ == "__main__":

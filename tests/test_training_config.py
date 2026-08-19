@@ -17,10 +17,16 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
     assert config["data"]["min_total_scaffold_length"] == 8
     assert config["data"]["preferred_total_scaffold_length"] == 24
     assert config["data"]["motif_length_buckets"][-1] == [128, 512, 0.05]
+    assert config["data"]["full_mask_probability"] > 0
+    assert config["data"]["span_mask_probability"] > 0
     assert config["model"]["d_model"] >= 768
     assert config["model"]["num_layers"] >= 12
     assert config["model"]["activation_checkpointing"] is True
     assert config["model"]["pretrained"]["kind"] == "rna_fm"
     assert config["model"]["pretrained"]["freeze"] is True
+    assert config["model"]["warmup_fraction"] == 0.05
+    assert config["model"]["min_lr_fraction"] == 0.02
+    assert config["model"]["label_smoothing"] > 0
+    assert config["trainer"]["early_stopping_patience"] > 0
     assert config["trainer"]["args"]["precision"] == "bf16-mixed"
     assert config["trainer"]["args"]["accumulate_grad_batches"] >= 2

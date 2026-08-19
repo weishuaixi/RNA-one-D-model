@@ -180,6 +180,11 @@ class RnaMotifDenoisingDataset(Dataset):
         min_flank_length: int = 2,
         min_total_scaffold_length: int = 8,
         preferred_total_scaffold_length: int = 24,
+        full_mask_probability: float = 0.35,
+        span_mask_probability: float = 0.35,
+        min_random_mask_fraction: float = 0.30,
+        max_random_mask_fraction: float = 0.80,
+        mean_span_length: int = 8,
         seed: int = 42,
         allow_empty: bool = False,
     ) -> None:
@@ -197,6 +202,21 @@ class RnaMotifDenoisingDataset(Dataset):
         self.min_flank_length = min_flank_length
         self.min_total_scaffold_length = min_total_scaffold_length
         self.preferred_total_scaffold_length = preferred_total_scaffold_length
+        if not 0 <= full_mask_probability <= 1:
+            raise ValueError("full_mask_probability must be in [0, 1]")
+        if not 0 <= span_mask_probability <= 1:
+            raise ValueError("span_mask_probability must be in [0, 1]")
+        if full_mask_probability + span_mask_probability > 1:
+            raise ValueError("full and span mask probabilities must sum to at most one")
+        if not 0 < min_random_mask_fraction <= max_random_mask_fraction <= 1:
+            raise ValueError("random mask fractions must satisfy 0 < min <= max <= 1")
+        if mean_span_length < 2:
+            raise ValueError("mean_span_length must be at least two")
+        self.full_mask_probability = full_mask_probability
+        self.span_mask_probability = span_mask_probability
+        self.min_random_mask_fraction = min_random_mask_fraction
+        self.max_random_mask_fraction = max_random_mask_fraction
+        self.mean_span_length = mean_span_length
         self.seed = seed
         self.epoch = 0
         if not self.records and not allow_empty:
@@ -247,22 +267,51 @@ class RnaMotifDenoisingDataset(Dataset):
         target_base_ids[:length] = torch.tensor(
             [base_to_class[base] for base in example.target_sequence], dtype=torch.long
         )
-        input_ids = torch.full((self.max_length,), self.tokenizer.pad_token_id, dtype=torch.long)
-        input_ids[:length] = self.tokenizer.token_to_id[self.tokenizer.special.mask]
+        input_ids = target.clone()
         fixed_mask = torch.zeros(self.max_length, dtype=torch.bool)
         fixed_mask[example.motif_start : example.motif_end] = True
-        input_ids[fixed_mask] = target[fixed_mask]
         attention_mask = torch.arange(self.max_length) < length
+        scaffold_mask = attention_mask & ~fixed_mask
+        prediction_mask = self._sample_prediction_mask(scaffold_mask, generator)
+        input_ids[prediction_mask] = self.tokenizer.token_to_id[self.tokenizer.special.mask]
         return {
             "input_ids": input_ids,
             "target_token_ids": target,
             "target_base_ids": target_base_ids,
             "fixed_mask": fixed_mask,
+            "prediction_mask": prediction_mask,
             "attention_mask": attention_mask,
             "target_length": torch.tensor(length, dtype=torch.long),
             "motif_start": torch.tensor(example.motif_start, dtype=torch.long),
             "source_start": torch.tensor(source_start, dtype=torch.long),
         }
+
+    def _sample_prediction_mask(
+        self,
+        scaffold_mask: torch.Tensor,
+        generator: torch.Generator,
+    ) -> torch.Tensor:
+        positions = scaffold_mask.nonzero(as_tuple=False).squeeze(-1)
+        if positions.numel() == 0:
+            raise ValueError("every example must contain at least one scaffold position")
+        draw = float(torch.rand((), generator=generator).item())
+        prediction = torch.zeros_like(scaffold_mask)
+        if draw < self.full_mask_probability:
+            return scaffold_mask.clone()
+        if draw < self.full_mask_probability + self.span_mask_probability:
+            span_length = min(self.mean_span_length, int(positions.numel()))
+            start = int(
+                torch.randint(0, int(positions.numel()) - span_length + 1, (1,), generator=generator).item()
+            )
+            prediction[positions[start : start + span_length]] = True
+            return prediction
+        fraction = self.min_random_mask_fraction + (
+            self.max_random_mask_fraction - self.min_random_mask_fraction
+        ) * float(torch.rand((), generator=generator).item())
+        count = max(1, min(int(positions.numel()), round(int(positions.numel()) * fraction)))
+        order = torch.randperm(int(positions.numel()), generator=generator)[:count]
+        prediction[positions[order]] = True
+        return prediction
 
 
 def build_partitioned_denoising_datasets(
@@ -275,6 +324,11 @@ def build_partitioned_denoising_datasets(
     min_flank_length: int = 2,
     min_total_scaffold_length: int = 8,
     preferred_total_scaffold_length: int = 24,
+    full_mask_probability: float = 0.35,
+    span_mask_probability: float = 0.35,
+    min_random_mask_fraction: float = 0.30,
+    max_random_mask_fraction: float = 0.80,
+    mean_span_length: int = 8,
     seed: int = 42,
 ) -> tuple[dict[str, RnaMotifDenoisingDataset], SplitManifest]:
     manifest = build_family_disjoint_manifest(records, seed=seed)
@@ -290,6 +344,11 @@ def build_partitioned_denoising_datasets(
             min_flank_length=min_flank_length,
             min_total_scaffold_length=min_total_scaffold_length,
             preferred_total_scaffold_length=preferred_total_scaffold_length,
+            full_mask_probability=full_mask_probability,
+            span_mask_probability=span_mask_probability,
+            min_random_mask_fraction=min_random_mask_fraction,
+            max_random_mask_fraction=max_random_mask_fraction,
+            mean_span_length=mean_span_length,
             seed=seed,
             allow_empty=True,
         )

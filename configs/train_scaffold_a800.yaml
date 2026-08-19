@@ -20,6 +20,11 @@ data:
   min_flank_length: 2
   min_total_scaffold_length: 8
   preferred_total_scaffold_length: 24
+  full_mask_probability: 0.35
+  span_mask_probability: 0.35
+  min_random_mask_fraction: 0.30
+  max_random_mask_fraction: 0.80
+  mean_span_length: 8
   max_source_length: 512
   max_target_length: 512
   batch_size: 8
@@ -45,9 +50,14 @@ model:
   weight_decay: 0.05
   length_loss_weight: 0.25
   position_loss_weight: 0.25
+  label_smoothing: 0.05
+  warmup_fraction: 0.05
+  min_lr_fraction: 0.02
 
 trainer:
   checkpoint_dir: checkpoints_scaffold_a800
+  early_stopping_patience: 12
+  resume_from_checkpoint:
   args:
     accelerator: gpu
     devices: 1
