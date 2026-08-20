@@ -336,15 +336,45 @@ def build_partitioned_denoising_datasets(
     seed: int = 42,
     val_fraction: float = 0.1,
     test_fraction: float = 0.1,
+    source_sha256: dict[str, str] | None = None,
+    clustering_thresholds: dict[str, float] | None = None,
+    expected_partition_counts: dict[str, int] | None = None,
 ) -> tuple[dict[str, RnaMotifDenoisingDataset], SplitManifest]:
+    record_ids = {record.target_id for record in records}
+    if len(record_ids) != len(records):
+        raise ValueError("record target IDs must be unique")
+    sequence_hashes = [record.sequence_sha256 for record in records]
+    if len(sequence_hashes) != len(set(sequence_hashes)):
+        raise ValueError("duplicate normalized sequence in formal training records")
+    required_context = max(2 * min_flank_length, min_total_scaffold_length)
+    eligible_records = [
+        record for record in records if min_motif_length + required_context <= len(record.sequence)
+    ]
+    eligible_ids = {record.target_id for record in eligible_records}
+    if set(cluster_by_id) != record_ids:
+        unknown = sorted(set(cluster_by_id) - record_ids)
+        missing = sorted(record_ids - set(cluster_by_id))
+        if unknown:
+            raise ValueError(f"cluster assignments contain unknown target IDs: {unknown}")
+        raise ValueError(f"cluster assignments are incomplete; missing target IDs: {missing}")
+    eligible_cluster_by_id = {
+        target_id: cluster_id for target_id, cluster_id in cluster_by_id.items() if target_id in eligible_ids
+    }
+    audit_source_sha256 = dict(source_sha256 or {})
+    cluster_manifest_sha256 = getattr(cluster_by_id, "source_sha256", None)
+    if cluster_manifest_sha256:
+        audit_source_sha256.setdefault("cluster_manifest", cluster_manifest_sha256)
     manifest = build_cluster_disjoint_manifest(
-        records,
-        cluster_by_id,
+        eligible_records,
+        eligible_cluster_by_id,
         seed=seed,
         val_fraction=val_fraction,
         test_fraction=test_fraction,
+        source_sha256=audit_source_sha256,
+        clustering_thresholds=clustering_thresholds,
+        expected_partition_counts=expected_partition_counts,
     )
-    by_id = {record.target_id: record for record in records}
+    by_id = {record.target_id: record for record in eligible_records}
     datasets = {
         partition: RnaMotifDenoisingDataset(
             records=[by_id[target_id] for target_id in manifest.partitions[partition]],
@@ -366,6 +396,8 @@ def build_partitioned_denoising_datasets(
         )
         for partition in manifest.partitions
     }
+    if sum(len(dataset) for dataset in datasets.values()) != manifest.record_counts["total"]:
+        raise ValueError("partition totals must equal the eligible dataset total")
     return datasets, manifest
 
 

@@ -9,6 +9,13 @@ wandb:
 data:
   train_data: data/processed/rna_merged_mmseqs80.csv
   cluster_manifest: outputs/mmseqs80_search/rna80_connected_components.tsv
+  cluster_thresholds:
+    min_sequence_identity: 0.8
+    min_bidirectional_coverage: 0.8
+  expected_partition_counts:
+    train: 1513
+    validation: 133
+    test: 169
   task: motif_denoising
   min_motif_length: 4
   max_motif_length:
@@ -30,7 +37,8 @@ data:
   max_target_length: 512
   batch_size: 8
   num_workers: 12
-  val_fraction: 0.05
+  val_fraction: 0.07327823691460055
+  test_fraction: 0.0931129476584022
   seed: 42
 
 model:

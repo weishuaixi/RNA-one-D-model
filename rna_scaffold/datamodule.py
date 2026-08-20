@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import torch
@@ -47,6 +48,9 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         batch_size: int = 64,
         num_workers: int = 4,
         val_fraction: float = 0.05,
+        test_fraction: float = 0.1,
+        expected_partition_counts: dict[str, int] | None = None,
+        cluster_thresholds: dict[str, float] | None = None,
         seed: int = 42,
     ) -> None:
         super().__init__()
@@ -54,6 +58,8 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         if not str(self.train_data):
             raise ValueError("Either train_data or train_fasta must be provided.")
         self.cluster_manifest = Path(cluster_manifest) if cluster_manifest else None
+        if task == "motif_denoising" and self.cluster_manifest is None:
+            raise ValueError("cluster_manifest must be provided for motif_denoising training")
         self.tokenizer = tokenizer
         self.task = task
         self.motif_length = motif_length
@@ -74,16 +80,20 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.val_fraction = val_fraction
+        self.test_fraction = test_fraction
+        self.expected_partition_counts = expected_partition_counts
+        self.cluster_thresholds = cluster_thresholds
         self.seed = seed
 
     def setup(self, stage: str | None = None) -> None:
         if self.task == "motif_denoising":
             if self.cluster_manifest is None:
                 raise ValueError("cluster_manifest must be provided for motif_denoising training")
-            records = load_sequence_records(self.train_data, skip_invalid=True)
+            cluster_by_id = load_cluster_assignments(self.cluster_manifest)
+            records = load_sequence_records(self.train_data, skip_invalid=False)
             datasets, self.split_manifest = build_partitioned_denoising_datasets(
                 records=records,
-                cluster_by_id=load_cluster_assignments(self.cluster_manifest),
+                cluster_by_id=cluster_by_id,
                 tokenizer=self.tokenizer,
                 max_length=self.max_target_length,
                 min_motif_length=self.min_motif_length,
@@ -99,6 +109,10 @@ class RnaScaffoldDataModule(L.LightningDataModule):
                 mean_span_length=self.mean_span_length,
                 seed=self.seed,
                 val_fraction=self.val_fraction,
+                test_fraction=self.test_fraction,
+                source_sha256={"sequence_table": hashlib.sha256(self.train_data.read_bytes()).hexdigest()},
+                clustering_thresholds=self.cluster_thresholds,
+                expected_partition_counts=self.expected_partition_counts,
             )
             self.train_dataset = datasets["train"]
             self.val_dataset = datasets["validation"]
@@ -120,6 +134,14 @@ class RnaScaffoldDataModule(L.LightningDataModule):
             )
             if not len(self.train_dataset):
                 raise ValueError("Family-disjoint split produced an empty training partition")
+            expected_counts = self.expected_partition_counts or {}
+            empty_required = [
+                partition
+                for partition, expected_count in expected_counts.items()
+                if expected_count > 0 and not len(datasets[partition])
+            ]
+            if empty_required:
+                raise ValueError(f"expected non-empty partitions are empty: {empty_required}")
             return
         sequences = load_sequences(self.train_data)
         if self.task == "flank_scaffold":

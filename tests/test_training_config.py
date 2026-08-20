@@ -10,6 +10,15 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
     assert config["data"]["train_data"] == "data/processed/rna_merged_mmseqs80.csv"
     assert config["data"]["cluster_manifest"] == "outputs/mmseqs80_search/rna80_connected_components.tsv"
     assert "train_sequences.csv" not in config_path.read_text(encoding="utf-8")
+    assert config["data"]["expected_partition_counts"] == {
+        "train": 1513,
+        "validation": 133,
+        "test": 169,
+    }
+    assert config["data"]["cluster_thresholds"] == {
+        "min_sequence_identity": 0.8,
+        "min_bidirectional_coverage": 0.8,
+    }
     assert config["data"]["max_target_length"] == 512
     assert config["data"]["min_motif_length"] == 4
     assert config["data"]["max_motif_length"] is None

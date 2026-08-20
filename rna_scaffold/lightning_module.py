@@ -125,13 +125,16 @@ class RnaScaffoldLitModule(L.LightningModule):
             length_logits=placement_output.length_logits,
             position_logits=placement_output.position_logits,
         )
+        target_left_length = batch["target_left_length"]
+        target_right_length = batch["target_right_length"]
+        motif_length = batch["fixed_mask"].long().sum(dim=1)
         losses = compute_denoising_losses(
             output=output,
             target_base_ids=batch["target_base_ids"],
             fixed_mask=batch["fixed_mask"],
             attention_mask=batch["attention_mask"],
-            target_length=batch["target_length"],
-            motif_start=batch["motif_start"],
+            target_length=target_left_length + motif_length + target_right_length,
+            motif_start=target_left_length,
             prediction_mask=batch.get("prediction_mask"),
             length_loss_weight=self.length_loss_weight,
             position_loss_weight=self.position_loss_weight,

@@ -50,9 +50,12 @@ def load_sequence_records(
             raise ValueError(f"CSV must contain a sequence column: {source_path}")
         for index, row in enumerate(reader):
             sequence = (row.get("sequence") or "").strip()
-            if not sequence:
-                continue
             target_id = (row.get("target_id") or row.get("id") or f"row_{index}").strip()
+            if not sequence:
+                if skip_invalid:
+                    skipped_ids.append(target_id)
+                    continue
+                raise ValueError(f"empty RNA sequence for {target_id}")
             family = (row.get("family") or "").strip() or None
             source = (row.get("source") or source_path.stem).strip()
             try:

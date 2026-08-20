@@ -1,9 +1,12 @@
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 pytest.importorskip("lightning.pytorch")
 
 from rna_scaffold.lightning_module import RnaScaffoldLitModule, compact_fixed_motifs
+from rna_scaffold.data import RnaMotifDenoisingDataset
+from rna_scaffold.records import RnaSequenceRecord
 from rna_scaffold.tokenizer import RnaTokenizer
 
 
@@ -25,13 +28,44 @@ def test_lightning_module_returns_finite_joint_denoising_loss():
         "target_base_ids": torch.tensor([[0, 0, 3, 1, -100, -100, -100, -100]]),
         "fixed_mask": torch.tensor([[False, True, True, False, False, False, False, False]]),
         "attention_mask": torch.tensor([[True, True, True, True, False, False, False, False]]),
-        "target_length": torch.tensor([4]),
-        "motif_start": torch.tensor([1]),
+        "target_left_length": torch.tensor([1]),
+        "target_right_length": torch.tensor([1]),
     }
 
     output = model.training_step(batch, batch_idx=0)
 
     assert set(output) >= {"loss", "base_loss", "length_loss", "position_loss", "token_accuracy"}
+    assert torch.isfinite(output["loss"])
+
+
+def test_lightning_module_trains_on_a_real_v2_denoising_dataset_batch():
+    tokenizer = RnaTokenizer()
+    dataset = RnaMotifDenoisingDataset(
+        records=[RnaSequenceRecord("x", "AACCGGUU", "RF1", "unit")],
+        tokenizer=tokenizer,
+        max_length=8,
+        min_motif_length=4,
+        max_motif_length=4,
+        motif_length_buckets=None,
+        min_flank_length=2,
+        min_total_scaffold_length=0,
+        preferred_total_scaffold_length=0,
+    )
+    batch = next(iter(DataLoader(dataset, batch_size=1)))
+    model = RnaScaffoldLitModule(
+        vocab_size=tokenizer.vocab_size,
+        pad_token_id=tokenizer.pad_token_id,
+        d_model=32,
+        nhead=4,
+        num_layers=1,
+        dim_feedforward=64,
+        dropout=0.0,
+        max_length=8,
+        lr=1e-3,
+    )
+
+    output = model.training_step(batch, batch_idx=0)
+
     assert torch.isfinite(output["loss"])
 
 
