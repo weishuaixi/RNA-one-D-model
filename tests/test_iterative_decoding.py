@@ -1,6 +1,6 @@
 import torch
 
-from rna_scaffold.decoding import DecodingSettings, iterative_denoise, select_length_position
+from rna_scaffold.decoding import DecodingSettings, iterative_denoise, select_flank_lengths
 from rna_scaffold.model import ScaffoldModelOutput
 from rna_scaffold.tokenizer import RnaTokenizer
 
@@ -13,48 +13,53 @@ class DeterministicScaffoldModel(torch.nn.Module):
         logits = torch.full((batch, length, 4), -10.0, device=input_ids.device)
         preferred = torch.arange(length, device=input_ids.device) % 4
         logits.scatter_(2, preferred.view(1, length, 1).expand(batch, -1, -1), 10.0)
-        length_logits = torch.full((batch, 17), -100.0, device=input_ids.device)
-        length_logits[:, 10] = 10.0
-        position_logits = torch.full((batch, 16), -100.0, device=input_ids.device)
-        position_logits[:, 3] = 10.0
-        return ScaffoldModelOutput(logits, length_logits, position_logits)
+        left_length_logits = torch.full((batch, 17), -100.0, device=input_ids.device)
+        left_length_logits[:, 3] = 10.0
+        right_length_logits = torch.full((batch, 17), -100.0, device=input_ids.device)
+        right_length_logits[:, 3] = 10.0
+        return ScaffoldModelOutput(logits, left_length_logits, right_length_logits)
 
 
-def test_select_length_position_masks_impossible_pairs():
-    output = DeterministicScaffoldModel()(
-        torch.tensor([[3, 3, 3, 3]]), torch.ones(1, 4, dtype=torch.bool)
-    )
-
-    total_length, motif_start = select_length_position(
-        output,
-        motif_length=8,
-        max_length=9,
-        generator=torch.Generator().manual_seed(7),
-        sample=False,
-        min_scaffold_length=1,
-        min_flank_length=0,
-    )
-
-    assert total_length == 9
-    assert motif_start == 0
+def _flank_output_with_illegal_marginal_maxima() -> ScaffoldModelOutput:
+    token_logits = torch.zeros((1, 4, 4))
+    left_length_logits = torch.full((1, 11), -100.0)
+    right_length_logits = torch.full((1, 11), -100.0)
+    left_length_logits[0, 0] = 100.0
+    right_length_logits[0, 0] = 100.0
+    left_length_logits[0, 2] = 90.0
+    right_length_logits[0, 2] = 90.0
+    return ScaffoldModelOutput(token_logits, left_length_logits, right_length_logits)
 
 
-def test_select_length_position_enforces_scaffold_and_bilateral_flanks():
-    output = DeterministicScaffoldModel()(
-        torch.tensor([[3, 3, 3, 3]]), torch.ones(1, 4, dtype=torch.bool)
-    )
-
-    total_length, motif_start = select_length_position(
-        output,
+def test_select_flank_lengths_masks_illegal_joint_marginal_maxima():
+    left_length, right_length = select_flank_lengths(
+        _flank_output_with_illegal_marginal_maxima(),
         motif_length=4,
-        max_length=8,
+        max_length=10,
         generator=torch.Generator().manual_seed(7),
         sample=False,
         min_scaffold_length=4,
         min_flank_length=2,
     )
 
-    assert (total_length, motif_start) == (8, 2)
+    assert (left_length, right_length) == (2, 2)
+
+
+def test_select_flank_lengths_sampling_never_returns_illegal_joint_pair():
+    selections = {
+        select_flank_lengths(
+            _flank_output_with_illegal_marginal_maxima(),
+            motif_length=4,
+            max_length=10,
+            generator=torch.Generator().manual_seed(seed),
+            sample=True,
+            min_scaffold_length=4,
+            min_flank_length=2,
+        )
+        for seed in range(20)
+    }
+
+    assert selections <= {(2, 2), (2, 3), (2, 4), (3, 2), (3, 3), (4, 2)}
 
 
 def test_iterative_denoise_is_reproducible_and_preserves_motif():

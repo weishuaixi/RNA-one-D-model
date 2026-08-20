@@ -284,7 +284,7 @@ def generate_candidates(
 ) -> list[ScaffoldCandidate]:
     """Generate unique motif-preserving candidates with the learned checkpoint."""
     from rna_scaffold.checkpoints import load_scaffold_checkpoint
-    from rna_scaffold.decoding import DecodingSettings, iterative_denoise, select_length_position
+    from rna_scaffold.decoding import DecodingSettings, iterative_denoise, select_flank_lengths
 
     motif = motif.strip().upper().replace("T", "U")
     if len(motif) < 4 or not validate_rna_sequence(motif):
@@ -317,7 +317,7 @@ def generate_candidates(
         for _ in range(max_attempts):
             if len(candidates) >= settings.num_candidates:
                 break
-            total_length, motif_start = select_length_position(
+            left_length, right_length = select_flank_lengths(
                 placement_output,
                 motif_length=len(motif),
                 max_length=maximum,
@@ -326,6 +326,8 @@ def generate_candidates(
                 min_scaffold_length=settings.min_scaffold_length,
                 min_flank_length=settings.min_flank_length,
             )
+            total_length = left_length + len(motif) + right_length
+            motif_start = left_length
             decoded = iterative_denoise(
                 loaded.model.model,
                 loaded.tokenizer,

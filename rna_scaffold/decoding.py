@@ -34,7 +34,7 @@ class DecodedScaffold:
     unresolved_counts: tuple[int, ...]
 
 
-def select_length_position(
+def select_flank_lengths(
     output: ScaffoldModelOutput,
     motif_length: int,
     max_length: int,
@@ -43,33 +43,35 @@ def select_length_position(
     min_scaffold_length: int = 1,
     min_flank_length: int = 0,
 ) -> tuple[int, int]:
-    if output.length_logits.shape[0] != 1 or output.position_logits.shape[0] != 1:
-        raise ValueError("length/position selection currently requires batch size one")
-    model_max = min(output.length_logits.shape[-1] - 1, output.position_logits.shape[-1])
-    upper = min(int(max_length), model_max)
-    pairs: list[tuple[int, int]] = []
-    scores: list[torch.Tensor] = []
-    length_log_probs = output.length_logits[0].float().log_softmax(dim=-1)
-    position_log_probs = output.position_logits[0].float().log_softmax(dim=-1)
+    if output.left_length_logits.shape[0] != 1 or output.right_length_logits.shape[0] != 1:
+        raise ValueError("flank-length selection currently requires batch size one")
     if min_scaffold_length < 1 or min_flank_length < 0:
         raise ValueError("invalid minimum scaffold or flank length")
-    first_length = motif_length + max(min_scaffold_length, 2 * min_flank_length)
-    for total_length in range(first_length, upper + 1):
-        for motif_start in range(
-            min_flank_length,
-            total_length - motif_length - min_flank_length + 1,
-        ):
-            pairs.append((total_length, motif_start))
-            scores.append(length_log_probs[total_length] + position_log_probs[motif_start])
-    if not pairs:
+    left_log_probs = output.left_length_logits[0].float().log_softmax(dim=-1)
+    right_log_probs = output.right_length_logits[0].float().log_softmax(dim=-1)
+    largest_flank = min(
+        left_log_probs.shape[-1] - 1,
+        right_log_probs.shape[-1] - 1,
+        int(max_length) - motif_length - min_flank_length,
+    )
+    if largest_flank < min_flank_length:
         raise ValueError("motif cannot fit within the requested maximum length")
-    pair_scores = torch.stack(scores)
+    lengths = torch.arange(min_flank_length, largest_flank + 1, device=left_log_probs.device)
+    pairs = torch.cartesian_prod(lengths, lengths)
+    total_lengths = pairs[:, 0] + motif_length + pairs[:, 1]
+    legal_pairs = pairs[
+        (pairs[:, 0] + pairs[:, 1] >= max(min_scaffold_length, 2 * min_flank_length))
+        & (total_lengths <= int(max_length))
+    ]
+    if legal_pairs.numel() == 0:
+        raise ValueError("motif cannot fit within the requested maximum length")
+    pair_scores = left_log_probs[legal_pairs[:, 0]] + right_log_probs[legal_pairs[:, 1]]
     if sample:
         probabilities = torch.softmax(pair_scores, dim=0)
         index = int(torch.multinomial(probabilities, 1, generator=generator).item())
     else:
         index = int(torch.argmax(pair_scores).item())
-    return pairs[index]
+    return tuple(int(length) for length in legal_pairs[index].tolist())
 
 
 def _filtered_probabilities(logits: torch.Tensor, settings: DecodingSettings) -> torch.Tensor:

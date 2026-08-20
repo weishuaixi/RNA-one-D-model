@@ -1,3 +1,7 @@
+import pytest
+import torch
+
+from rna_scaffold.decoding import DecodedScaffold
 from rna_scaffold.generate import (
     GenerationSettings,
     RnaTrainingPrior,
@@ -5,10 +9,12 @@ from rna_scaffold.generate import (
     build_motif_scaffold_sequence,
     build_random_natural_scaffold_result,
     build_single_best_result,
-    generate_rna_sequence,
+    generate_candidates,
     generate_markov_baseline,
+    generate_rna_sequence,
 )
-import pytest
+from rna_scaffold.model import ScaffoldModelOutput
+from rna_scaffold.tokenizer import RnaTokenizer
 
 
 def test_training_prior_smoothing_keeps_all_bases_sampleable():
@@ -187,6 +193,62 @@ def test_build_motif_scaffold_sequence_can_use_internal_length_range_without_use
 def test_generate_rna_sequence_requires_checkpoint():
     with pytest.raises(TypeError):
         generate_rna_sequence(motif="GCGG")
+
+
+def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths(monkeypatch):
+    class PlacementModel(torch.nn.Module):
+        max_length = 16
+
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Identity()
+
+        def forward(self, input_ids, attention_mask=None):
+            token_logits = torch.zeros((1, input_ids.shape[1], 4))
+            left_length_logits = torch.full((1, 17), -100.0)
+            right_length_logits = torch.full((1, 17), -100.0)
+            left_length_logits[0, 2] = 100.0
+            right_length_logits[0, 3] = 100.0
+            return ScaffoldModelOutput(token_logits, left_length_logits, right_length_logits)
+
+    decoded_geometry = []
+
+    def fake_iterative_denoise(model, tokenizer, motif, total_length, motif_start, settings, generator, device):
+        decoded_geometry.append((total_length, motif_start))
+        return DecodedScaffold(
+            sequence="AA" + motif + "AAA",
+            normalized_log_probability=-0.5,
+            unresolved_counts=(0,),
+        )
+
+    loaded = type(
+        "Loaded",
+        (),
+        {
+            "model": PlacementModel(),
+            "tokenizer": RnaTokenizer(),
+            "max_length": 16,
+            "checkpoint_sha256": "test-checkpoint",
+        },
+    )()
+    monkeypatch.setattr("rna_scaffold.checkpoints.load_scaffold_checkpoint", lambda checkpoint, device: loaded)
+    monkeypatch.setattr("rna_scaffold.decoding.iterative_denoise", fake_iterative_denoise)
+
+    candidates = generate_candidates(
+        checkpoint="ignored.ckpt",
+        motif="GCGG",
+        settings=GenerationSettings(
+            num_candidates=1,
+            max_attempt_multiplier=1,
+            max_length=16,
+            min_scaffold_length=1,
+            seed=7,
+        ),
+    )
+
+    assert decoded_geometry == [(9, 2)]
+    assert candidates[0].motif_start == 2
+    assert candidates[0].total_length == 9
 
 
 def test_markov_baseline_can_follow_training_length_distribution(tmp_path):
