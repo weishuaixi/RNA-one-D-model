@@ -4,7 +4,7 @@ import json
 import math
 import random
 from collections import Counter
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -179,6 +179,8 @@ class ScaffoldCandidate:
     generation_settings: dict = field(default_factory=dict)
     architecture_version: int = 2
     generation_audit: dict = field(default_factory=dict)
+    gc_in_soft_range: bool = True
+    gc_soft_penalty: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -197,19 +199,22 @@ class CandidateGenerationAudit:
     rejected: dict[str, int]
 
 
-@dataclass(frozen=True)
-class GeneratedCandidates(Sequence[ScaffoldCandidate]):
-    candidates: list[ScaffoldCandidate]
-    audit: CandidateGenerationAudit
+class GeneratedCandidates(list[ScaffoldCandidate]):
+    """A list-compatible generated batch with reproducibility metadata."""
 
-    def __len__(self) -> int:
-        return len(self.candidates)
-
-    def __getitem__(self, index: int) -> ScaffoldCandidate:
-        return self.candidates[index]
-
-    def __iter__(self) -> Iterator[ScaffoldCandidate]:
-        return iter(self.candidates)
+    def __init__(
+        self,
+        candidates: Sequence[ScaffoldCandidate] = (),
+        audit: CandidateGenerationAudit | None = None,
+        generation_settings: dict | None = None,
+    ) -> None:
+        super().__init__(candidates)
+        self.audit = audit or CandidateGenerationAudit(
+            requested=len(self), max_attempts=len(self), attempted=len(self), accepted=len(self), rejected={}
+        )
+        self.generation_settings = dict(
+            generation_settings if generation_settings is not None else (self[0].generation_settings if self else {})
+        )
 
 
 def build_auto_masked_scaffold_prompts(
@@ -486,6 +491,8 @@ def generate_candidates(
                     valid=valid,
                     status="ok" if valid else "invalid",
                     generation_settings=asdict(settings),
+                    gc_in_soft_range=bool(decision.metadata.get("gc_in_soft_range", True)),
+                    gc_soft_penalty=float(decision.metadata.get("gc_soft_penalty", 0.0)),
                 )
             )
     audit = CandidateGenerationAudit(
@@ -506,7 +513,10 @@ def generate_candidates(
         )
         for candidate in candidates
     ]
-    return GeneratedCandidates(candidates, audit)
+    candidates.sort(
+        key=lambda candidate: (candidate.gc_soft_penalty, -candidate.normalized_log_probability, candidate.candidate_id)
+    )
+    return GeneratedCandidates(candidates, audit, asdict(settings))
 
 
 def generate_rna_sequence(
@@ -527,18 +537,42 @@ def generate_rna_sequence(
     return max(candidates, key=lambda candidate: candidate.normalized_log_probability).full_sequence
 
 
+def _artifact_metadata(candidates: Sequence[ScaffoldCandidate]) -> dict:
+    if isinstance(candidates, GeneratedCandidates):
+        return {
+            "architecture_version": 2,
+            "generation_settings": candidates.generation_settings,
+            "generation_audit": asdict(candidates.audit),
+        }
+    if candidates:
+        first = candidates[0]
+        audit = first.generation_audit or asdict(
+            CandidateGenerationAudit(len(candidates), len(candidates), len(candidates), len(candidates), {})
+        )
+        return {
+            "architecture_version": first.architecture_version,
+            "generation_settings": first.generation_settings,
+            "generation_audit": audit,
+        }
+    return {
+        "architecture_version": 2,
+        "generation_settings": {},
+        "generation_audit": asdict(CandidateGenerationAudit(0, 0, 0, 0, {})),
+    }
+
+
 def write_candidates_jsonl(candidates: Sequence[ScaffoldCandidate], output: str | Path) -> None:
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    metadata = _artifact_metadata(candidates)
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        if isinstance(candidates, GeneratedCandidates) and not candidates:
+        if not candidates:
             handle.write(
                 json.dumps(
                     {
                         "record_type": "generation_metadata",
-                        "architecture_version": 2,
-                        "generation_audit": asdict(candidates.audit),
+                        **metadata,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -547,9 +581,7 @@ def write_candidates_jsonl(candidates: Sequence[ScaffoldCandidate], output: str 
             )
         for candidate in candidates:
             row = asdict(candidate)
-            if isinstance(candidates, GeneratedCandidates):
-                row["architecture_version"] = 2
-                row["generation_audit"] = asdict(candidates.audit)
+            row.update(metadata)
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     temporary.replace(output_path)
 
@@ -558,10 +590,11 @@ def write_candidates_fasta(candidates: Sequence[ScaffoldCandidate], output: str 
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    metadata = _artifact_metadata(candidates)
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-        if isinstance(candidates, GeneratedCandidates):
-            handle.write('; ' + json.dumps({"architecture_version": 2}, sort_keys=True) + "\n")
-            handle.write('; ' + json.dumps({"generation_audit": asdict(candidates.audit)}, sort_keys=True) + "\n")
+        handle.write('; ' + json.dumps({"architecture_version": metadata["architecture_version"]}, sort_keys=True) + "\n")
+        handle.write('; ' + json.dumps({"generation_settings": metadata["generation_settings"]}, sort_keys=True) + "\n")
+        handle.write('; ' + json.dumps({"generation_audit": metadata["generation_audit"]}, sort_keys=True) + "\n")
         for candidate in candidates:
             handle.write(f">{candidate.candidate_id}\n{candidate.full_sequence}\n")
     temporary.replace(output_path)

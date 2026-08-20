@@ -3,6 +3,7 @@ import subprocess
 import sys
 
 import generate_scaffold
+import pytest
 from rna_scaffold.generate import (
     CandidateGenerationAudit,
     GeneratedCandidates,
@@ -91,8 +92,9 @@ def test_candidate_outputs_include_atomic_audit_metadata(tmp_path):
     assert row["generation_settings"] == {"max_attempts": 3}
     assert row["generation_audit"]["rejected"] == {"duplicate": 2}
     assert not fasta_output.with_suffix(fasta_output.suffix + ".tmp").exists()
-    assert fasta_output.read_text(encoding="utf-8").splitlines()[:3] == [
+    assert fasta_output.read_text(encoding="utf-8").splitlines()[:4] == [
         '; {"architecture_version": 2}',
+        '; {"generation_settings": {"max_attempts": 3}}',
         '; {"generation_audit": {"accepted": 1, "attempted": 3, "max_attempts": 3, "rejected": {"duplicate": 2}, "requested": 2}}',
         ">candidate_0001",
     ]
@@ -110,3 +112,45 @@ def test_cli_treats_audited_short_candidate_set_as_success(monkeypatch, tmp_path
         ["--motif", "GCGG", "--checkpoint", "unused.ckpt", "--output", str(output)]
     ) == 0
     assert json.loads(output.read_text(encoding="utf-8"))["generation_audit"]["accepted"] == 0
+
+
+@pytest.mark.parametrize(
+    ("writer", "suffix", "has_candidate"),
+    [
+        (write_candidates_jsonl, ".jsonl", True),
+        (write_candidates_jsonl, ".jsonl", False),
+        (write_candidates_fasta, ".fasta", True),
+        (write_candidates_fasta, ".fasta", False),
+    ],
+)
+def test_every_candidate_artifact_includes_complete_run_metadata(tmp_path, writer, suffix, has_candidate):
+    audit = CandidateGenerationAudit(requested=1, max_attempts=2, attempted=1, accepted=int(has_candidate), rejected={})
+    settings = {"max_attempts": 2, "gc_min": 0.4}
+    candidate = ScaffoldCandidate(
+        candidate_id="candidate_0001",
+        full_sequence="AAGCGGUU",
+        left_sequence="AA",
+        motif="GCGG",
+        right_sequence="UU",
+        motif_start=2,
+        motif_end=6,
+        total_length=8,
+        normalized_log_probability=-0.2,
+        checkpoint_sha256="abc",
+        seed=42,
+        gc_fraction=0.5,
+        max_homopolymer=2,
+        base_entropy=1.5,
+        motif_preserved=True,
+        valid=True,
+        status="ok",
+    )
+    generated = GeneratedCandidates([candidate] if has_candidate else [], audit, settings)
+    output = tmp_path / f"candidates{suffix}"
+
+    writer(generated, output)
+
+    text = output.read_text(encoding="utf-8")
+    assert '"architecture_version": 2' in text
+    assert '"generation_settings": {"gc_min": 0.4, "max_attempts": 2}' in text
+    assert '"generation_audit": {"accepted": ' in text

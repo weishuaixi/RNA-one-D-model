@@ -376,3 +376,69 @@ def test_generation_shortfall_is_audited_after_bounded_duplicate_attempts(monkey
         accepted=1,
         rejected={"duplicate": 2},
     )
+
+
+def test_soft_gc_outlier_is_persisted_and_ranked_after_in_range_candidate(monkeypatch):
+    class PlacementModel(torch.nn.Module):
+        max_length = 8
+
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Identity()
+
+        def forward(self, input_ids, attention_mask=None):
+            token_logits = torch.zeros((1, input_ids.shape[1], 4))
+            left_length_logits = torch.full((1, 9), -100.0)
+            right_length_logits = torch.full((1, 9), -100.0)
+            left_length_logits[0, 2] = 100.0
+            right_length_logits[0, 2] = 100.0
+            return ScaffoldModelOutput(token_logits, left_length_logits, right_length_logits)
+
+    loaded = type(
+        "Loaded",
+        (),
+        {
+            "model": PlacementModel(),
+            "tokenizer": RnaTokenizer(),
+            "max_length": 8,
+            "checkpoint_sha256": "test-checkpoint",
+        },
+    )()
+    decoded = iter((
+        DecodedScaffold("AAGCGGUU", -0.9, (0,)),
+        DecodedScaffold("GGGCGGGG", -0.1, (0,)),
+    ))
+    monkeypatch.setattr("rna_scaffold.checkpoints.load_scaffold_checkpoint", lambda checkpoint, device: loaded)
+    monkeypatch.setattr("rna_scaffold.decoding.select_flank_lengths", lambda *args, **kwargs: (2, 2))
+    monkeypatch.setattr("rna_scaffold.decoding.iterative_denoise", lambda *args, **kwargs: next(decoded))
+
+    result = generate_candidates(
+        checkpoint="ignored.ckpt",
+        motif="GCGG",
+        settings=GenerationSettings(
+            num_candidates=2,
+            max_attempts=2,
+            min_scaffold_length=1,
+            gc_min=0.4,
+            gc_max=0.6,
+        ),
+    )
+
+    assert [candidate.full_sequence for candidate in result] == ["AAGCGGUU", "GGGCGGGG"]
+    assert result[0].gc_in_soft_range is True
+    assert result[0].gc_soft_penalty == 0.0
+    assert result[1].gc_in_soft_range is False
+    assert result[1].gc_soft_penalty == pytest.approx(0.4)
+
+
+def test_generated_candidates_remain_a_mutable_list_with_run_metadata():
+    audit = CandidateGenerationAudit(requested=1, max_attempts=1, attempted=1, accepted=1, rejected={})
+    settings = {"max_attempts": 1}
+    generated = GeneratedCandidates([], audit, settings)
+
+    assert isinstance(generated, list)
+    assert generated == []
+    generated.append("candidate")
+    assert generated + ["next"] == ["candidate", "next"]
+    assert generated.audit is audit
+    assert generated.generation_settings == settings
