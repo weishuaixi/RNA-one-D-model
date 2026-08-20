@@ -6,6 +6,7 @@ import random
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from itertools import pairwise
 from pathlib import Path
 
 import torch
@@ -21,21 +22,25 @@ class RnaTrainingPrior:
     lengths: list[int]
     transition: dict[str, dict[str, float]]
     initial: dict[str, float]
+    second_order_transition: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @classmethod
-    def empty(cls) -> "RnaTrainingPrior":
-        return cls(lengths=[], transition={}, initial={})
+    def empty(cls) -> RnaTrainingPrior:
+        return cls(lengths=[], transition={}, initial={}, second_order_transition={})
 
     @classmethod
-    def from_path(cls, path: str | Path) -> "RnaTrainingPrior":
+    def from_path(cls, path: str | Path) -> RnaTrainingPrior:
         from rna_scaffold.data import load_sequences
 
         return cls.from_sequences(load_sequences(path))
 
     @classmethod
-    def from_sequences(cls, sequences: list[str]) -> "RnaTrainingPrior":
+    def from_sequences(cls, sequences: list[str]) -> RnaTrainingPrior:
         lengths: list[int] = []
         pair_counts: dict[str, Counter[str]] = {base: Counter() for base in BASES}
+        triplet_counts: dict[str, Counter[str]] = {
+            left + right: Counter() for left in BASES for right in BASES
+        }
         start_counts: Counter[str] = Counter()
         for raw_sequence in sequences:
             sequence = raw_sequence.strip().upper().replace("T", "U")
@@ -43,8 +48,10 @@ class RnaTrainingPrior:
                 continue
             lengths.append(len(sequence))
             start_counts[sequence[0]] += 1
-            for left, right in zip(sequence, sequence[1:]):
+            for left, right in pairwise(sequence):
                 pair_counts[left][right] += 1
+            for first, second, third in zip(sequence, sequence[1:], sequence[2:]):
+                triplet_counts[first + second][third] += 1
 
         # Laplace smoothing keeps every base sampleable, including for small
         # or compositionally narrow training files.
@@ -57,7 +64,19 @@ class RnaTrainingPrior:
                 base: (pair_counts[previous].get(base, 0) + 1) / total for base in BASES
             }
 
-        return cls(lengths=lengths, transition=transition, initial=initial)
+        second_order_transition: dict[str, dict[str, float]] = {}
+        for context, counts in triplet_counts.items():
+            total = sum(counts.values()) + len(BASES)
+            second_order_transition[context] = {
+                base: (counts.get(base, 0) + 1) / total for base in BASES
+            }
+
+        return cls(
+            lengths=lengths,
+            transition=transition,
+            initial=initial,
+            second_order_transition=second_order_transition,
+        )
 
     def has_statistics(self) -> bool:
         return bool(self.lengths) and len(self.transition) == len(BASES)
@@ -68,18 +87,27 @@ class RnaTrainingPrior:
             return None
         return rng.choice(valid_lengths)
 
-    def sample_sequence(self, length: int, rng: random.Random) -> str:
+    def sample_sequence(self, length: int, rng: random.Random, order: int = 1) -> str:
+        if order not in {1, 2}:
+            raise ValueError("order must be 1 or 2")
         if length <= 0:
             return ""
         if not self.has_statistics():
             return "".join(rng.choice(BASES) for _ in range(length))
         chars = [self._sample_base(None, rng)]
         for _ in range(length - 1):
-            chars.append(self._sample_base(chars[-1], rng))
+            probabilities = self.transition.get(chars[-1], {})
+            if order == 2 and len(chars) >= 2:
+                probabilities = self.second_order_transition.get("".join(chars[-2:]), probabilities)
+            chars.append(self._sample_probabilities(probabilities, rng))
         return "".join(chars)
 
     def _sample_base(self, previous: str | None, rng: random.Random) -> str:
         probs = self.initial if previous is None else self.transition.get(previous, {})
+        return self._sample_probabilities(probs, rng)
+
+    @staticmethod
+    def _sample_probabilities(probs: dict[str, float], rng: random.Random) -> str:
         if not probs:
             return rng.choice(BASES)
         population, weights = zip(*probs.items())
@@ -328,7 +356,7 @@ def _sequence_metrics(sequence: str) -> tuple[float, int, float]:
     gc_fraction = (counts["G"] + counts["C"]) / len(sequence)
     maximum_run = 1
     current_run = 1
-    for previous, current in zip(sequence, sequence[1:]):
+    for previous, current in pairwise(sequence):
         current_run = current_run + 1 if current == previous else 1
         maximum_run = max(maximum_run, current_run)
     entropy = 0.0

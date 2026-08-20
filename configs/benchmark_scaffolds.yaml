@@ -1,28 +1,48 @@
 seed: 42
 candidate_count: 16
+bootstrap_samples: 10000
+
 motifs:
   - id: motif_gugg
     sequence: GCGG
   - id: motif_augg
     sequence: AUGCGA
+
 methods:
-  - uniform
-  - markov
-  # Add trained ablations with equal budgets, for example:
-  # - name: complete_rnafm
-  #   kind: checkpoint
-  #   checkpoint: checkpoints_scaffold_a800_mmseqs80/best.ckpt
-  #   device: cuda
-  #   generation: {denoise_steps: 12, top_p: 0.95}
-  # - name: no_rnafm
-  #   kind: checkpoint
-  #   checkpoint: checkpoints_scaffold_no_rnafm/best.ckpt
-  # - name: single_pass
-  #   kind: checkpoint
-  #   checkpoint: checkpoints_scaffold_a800_mmseqs80/best.ckpt
-  #   generation: {denoise_steps: 1}
-training_data:
+  - name: uniform
+    kind: uniform
+  - name: markov1
+    kind: markov1
+  - name: markov2
+    kind: markov2
+  - name: transformer_no_rnafm
+    kind: checkpoint
+    checkpoint: checkpoints_scaffold_no_rnafm/best.ckpt
+    device: cuda
+    generation: {denoise_steps: 12, top_p: 0.95}
+  - name: transformer_frozen_rnafm
+    kind: checkpoint
+    checkpoint: checkpoints_scaffold_frozen_rnafm/best.ckpt
+    device: cuda
+    generation: {denoise_steps: 12, top_p: 0.95}
+  - name: transformer_rnafm_lora_iterative
+    kind: checkpoint
+    checkpoint: checkpoints_scaffold_a800/best.ckpt
+    device: cuda
+    primary: true
+    generation: {denoise_steps: 12, top_p: 0.95}
+  - name: single_pass_decoding
+    kind: checkpoint
+    checkpoint: checkpoints_scaffold_a800/best.ckpt
+    device: cuda
+    generation: {denoise_steps: 1, top_p: 0.95}
+training_data: data/processed/rna_merged_mmseqs80.csv
+cluster_manifest: outputs/mmseqs80_search/rna80_connected_components.tsv
+
 rnafold:
   enabled: false
   executable: RNAfold
+  timeout_seconds: 30
+  candidate_budget_per_motif: 16
+
 output_dir: outputs/scaffold_benchmark
