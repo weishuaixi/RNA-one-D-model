@@ -76,8 +76,8 @@ class RnaScaffoldLitModule(L.LightningModule):
         pretrained: dict | None = None,
         lr: float = 3e-4,
         weight_decay: float = 0.01,
-        length_loss_weight: float = 0.25,
-        position_loss_weight: float = 0.25,
+        left_length_loss_weight: float = 0.25,
+        right_length_loss_weight: float = 0.25,
         label_smoothing: float = 0.05,
         warmup_fraction: float = 0.05,
         min_lr_fraction: float = 0.02,
@@ -88,8 +88,8 @@ class RnaScaffoldLitModule(L.LightningModule):
         self.pad_token_id = int(pad_token_id)
         self.lr = lr
         self.weight_decay = weight_decay
-        self.length_loss_weight = length_loss_weight
-        self.position_loss_weight = position_loss_weight
+        self.left_length_loss_weight = left_length_loss_weight
+        self.right_length_loss_weight = right_length_loss_weight
         self.label_smoothing = label_smoothing
         self.warmup_fraction = warmup_fraction
         self.min_lr_fraction = min_lr_fraction
@@ -122,22 +122,19 @@ class RnaScaffoldLitModule(L.LightningModule):
         placement_output = self(motif_ids, motif_attention)
         output = ScaffoldModelOutput(
             token_logits=scaffold_output.token_logits,
-            length_logits=placement_output.length_logits,
-            position_logits=placement_output.position_logits,
+            left_length_logits=placement_output.left_length_logits,
+            right_length_logits=placement_output.right_length_logits,
         )
-        target_left_length = batch["target_left_length"]
-        target_right_length = batch["target_right_length"]
-        motif_length = batch["fixed_mask"].long().sum(dim=1)
         losses = compute_denoising_losses(
             output=output,
             target_base_ids=batch["target_base_ids"],
             fixed_mask=batch["fixed_mask"],
             attention_mask=batch["attention_mask"],
-            target_length=target_left_length + motif_length + target_right_length,
-            motif_start=target_left_length,
+            target_left_length=batch["target_left_length"],
+            target_right_length=batch["target_right_length"],
             prediction_mask=batch.get("prediction_mask"),
-            length_loss_weight=self.length_loss_weight,
-            position_loss_weight=self.position_loss_weight,
+            left_length_loss_weight=self.left_length_loss_weight,
+            right_length_loss_weight=self.right_length_loss_weight,
             label_smoothing=self.label_smoothing,
         )
         scaffold_mask = batch.get("prediction_mask")
@@ -147,12 +144,20 @@ class RnaScaffoldLitModule(L.LightningModule):
             output.token_logits.argmax(dim=-1)[scaffold_mask]
             == batch["target_base_ids"][scaffold_mask]
         ).float().mean()
+        left_length_accuracy = (
+            output.left_length_logits.argmax(dim=-1) == batch["target_left_length"]
+        ).float().mean()
+        right_length_accuracy = (
+            output.right_length_logits.argmax(dim=-1) == batch["target_right_length"]
+        ).float().mean()
         values = {
             "loss": losses.total_loss,
             "base_loss": losses.base_loss,
-            "length_loss": losses.length_loss,
-            "position_loss": losses.position_loss,
+            "left_length_loss": losses.left_length_loss,
+            "right_length_loss": losses.right_length_loss,
             "token_accuracy": token_accuracy,
+            "left_length_accuracy": left_length_accuracy,
+            "right_length_accuracy": right_length_accuracy,
         }
         for name, value in values.items():
             self.log(f"{stage}/{name}", value, prog_bar=name in {"loss", "token_accuracy"}, sync_dist=True)

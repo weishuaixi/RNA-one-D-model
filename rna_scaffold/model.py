@@ -11,16 +11,16 @@ from torch.utils.checkpoint import checkpoint
 @dataclass(frozen=True)
 class ScaffoldModelOutput:
     token_logits: torch.Tensor
-    length_logits: torch.Tensor
-    position_logits: torch.Tensor
+    left_length_logits: torch.Tensor
+    right_length_logits: torch.Tensor
 
 
 @dataclass(frozen=True)
 class DenoisingLosses:
     total_loss: torch.Tensor
     base_loss: torch.Tensor
-    length_loss: torch.Tensor
-    position_loss: torch.Tensor
+    left_length_loss: torch.Tensor
+    right_length_loss: torch.Tensor
 
 
 def compute_denoising_losses(
@@ -28,18 +28,15 @@ def compute_denoising_losses(
     target_base_ids: torch.Tensor,
     fixed_mask: torch.Tensor,
     attention_mask: torch.Tensor,
-    target_length: torch.Tensor,
-    motif_start: torch.Tensor,
+    target_left_length: torch.Tensor,
+    target_right_length: torch.Tensor,
     prediction_mask: torch.Tensor | None = None,
-    length_loss_weight: float = 0.25,
-    position_loss_weight: float = 0.25,
+    left_length_loss_weight: float = 0.25,
+    right_length_loss_weight: float = 0.25,
     label_smoothing: float = 0.0,
 ) -> DenoisingLosses:
-    scaffold_mask = (
-        prediction_mask.bool()
-        if prediction_mask is not None
-        else attention_mask.bool() & ~fixed_mask.bool()
-    )
+    mutable_positions = attention_mask.bool() & ~fixed_mask.bool()
+    scaffold_mask = prediction_mask.bool() & mutable_positions if prediction_mask is not None else mutable_positions
     if not scaffold_mask.any():
         raise ValueError("every batch must contain at least one scaffold position")
     base_loss = F.cross_entropy(
@@ -47,10 +44,14 @@ def compute_denoising_losses(
         target_base_ids[scaffold_mask],
         label_smoothing=label_smoothing,
     )
-    length_loss = F.cross_entropy(output.length_logits, target_length.long())
-    position_loss = F.cross_entropy(output.position_logits, motif_start.long())
-    total_loss = base_loss + length_loss_weight * length_loss + position_loss_weight * position_loss
-    return DenoisingLosses(total_loss, base_loss, length_loss, position_loss)
+    left_length_loss = F.cross_entropy(output.left_length_logits, target_left_length.long())
+    right_length_loss = F.cross_entropy(output.right_length_logits, target_right_length.long())
+    total_loss = (
+        base_loss
+        + left_length_loss_weight * left_length_loss
+        + right_length_loss_weight * right_length_loss
+    )
+    return DenoisingLosses(total_loss, base_loss, left_length_loss, right_length_loss)
 
 
 def restore_fixed_tokens(
@@ -64,7 +65,7 @@ def restore_fixed_tokens(
 
 
 class MotifDenoisingTransformer(nn.Module):
-    """Bidirectional RNA scaffold model with token, length, and position heads."""
+    """Bidirectional RNA scaffold model with token and bilateral flank-length heads."""
 
     def __init__(
         self,
@@ -105,8 +106,8 @@ class MotifDenoisingTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, enable_nested_tensor=False)
         self.final_norm = nn.LayerNorm(d_model)
         self.token_head = nn.Linear(d_model, 4)
-        self.length_head = nn.Linear(d_model, max_length + 1)
-        self.position_head = nn.Linear(d_model, max_length)
+        self.left_length_head = nn.Linear(d_model, max_length + 1)
+        self.right_length_head = nn.Linear(d_model, max_length + 1)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -154,6 +155,6 @@ class MotifDenoisingTransformer(nn.Module):
         pooled = (hidden * weights).sum(dim=1) / weights.sum(dim=1).clamp_min(1.0)
         return ScaffoldModelOutput(
             token_logits=self.token_head(hidden),
-            length_logits=self.length_head(pooled),
-            position_logits=self.position_head(pooled),
+            left_length_logits=self.left_length_head(pooled),
+            right_length_logits=self.right_length_head(pooled),
         )
