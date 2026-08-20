@@ -197,7 +197,7 @@ def test_generate_rna_sequence_requires_checkpoint():
 
 def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths(monkeypatch):
     class PlacementModel(torch.nn.Module):
-        max_length = 16
+        max_length = 10
 
         def __init__(self):
             super().__init__()
@@ -208,7 +208,8 @@ def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths
             left_length_logits = torch.full((1, 17), -100.0)
             right_length_logits = torch.full((1, 17), -100.0)
             left_length_logits[0, 2] = 100.0
-            right_length_logits[0, 3] = 100.0
+            right_length_logits[0, 6] = 100.0
+            right_length_logits[0, 4] = 90.0
             return ScaffoldModelOutput(token_logits, left_length_logits, right_length_logits)
 
     decoded_geometry = []
@@ -227,7 +228,7 @@ def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths
         {
             "model": PlacementModel(),
             "tokenizer": RnaTokenizer(),
-            "max_length": 16,
+            "max_length": 10,
             "checkpoint_sha256": "test-checkpoint",
         },
     )()
@@ -246,9 +247,9 @@ def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths
         ),
     )
 
-    assert decoded_geometry == [(9, 2)]
+    assert decoded_geometry == [(10, 2)]
     assert candidates[0].motif_start == 2
-    assert candidates[0].total_length == 9
+    assert candidates[0].total_length == 10
 
 
 def test_markov_baseline_can_follow_training_length_distribution(tmp_path):

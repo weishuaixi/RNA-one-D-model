@@ -60,8 +60,7 @@ def select_flank_lengths(
     pairs = torch.cartesian_prod(lengths, lengths)
     total_lengths = pairs[:, 0] + motif_length + pairs[:, 1]
     legal_pairs = pairs[
-        (pairs[:, 0] + pairs[:, 1] >= max(min_scaffold_length, 2 * min_flank_length))
-        & (total_lengths <= int(max_length))
+        (total_lengths >= min_scaffold_length) & (total_lengths <= int(max_length))
     ]
     if legal_pairs.numel() == 0:
         raise ValueError("motif cannot fit within the requested maximum length")

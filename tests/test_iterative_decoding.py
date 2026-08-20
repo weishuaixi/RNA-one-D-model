@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from rna_scaffold.decoding import DecodingSettings, iterative_denoise, select_flank_lengths
@@ -60,6 +61,60 @@ def test_select_flank_lengths_sampling_never_returns_illegal_joint_pair():
     }
 
     assert selections <= {(2, 2), (2, 3), (2, 4), (3, 2), (3, 3), (4, 2)}
+
+
+def test_select_flank_lengths_applies_minimum_to_total_canvas_length():
+    token_logits = torch.zeros((1, 20, 4))
+    left_length_logits = torch.full((1, 31), -100.0)
+    right_length_logits = torch.full((1, 31), -100.0)
+    left_length_logits[0, 2] = 100.0
+    right_length_logits[0, 3] = 100.0
+
+    left_length, right_length = select_flank_lengths(
+        ScaffoldModelOutput(token_logits, left_length_logits, right_length_logits),
+        motif_length=20,
+        max_length=30,
+        generator=torch.Generator().manual_seed(7),
+        sample=False,
+        min_scaffold_length=25,
+        min_flank_length=2,
+    )
+
+    assert (left_length, right_length) == (2, 3)
+
+
+def test_select_flank_lengths_rejects_pairs_above_requested_maximum():
+    token_logits = torch.zeros((1, 4, 4))
+    left_length_logits = torch.full((1, 11), -100.0)
+    right_length_logits = torch.full((1, 11), -100.0)
+    left_length_logits[0, 2] = 100.0
+    right_length_logits[0, 9] = 100.0
+    right_length_logits[0, 4] = 90.0
+
+    left_length, right_length = select_flank_lengths(
+        ScaffoldModelOutput(token_logits, left_length_logits, right_length_logits),
+        motif_length=4,
+        max_length=10,
+        generator=torch.Generator().manual_seed(7),
+        sample=False,
+        min_scaffold_length=1,
+        min_flank_length=2,
+    )
+
+    assert (left_length, right_length) == (2, 4)
+
+
+def test_select_flank_lengths_reports_when_no_pair_is_legal():
+    with pytest.raises(ValueError, match="motif cannot fit"):
+        select_flank_lengths(
+            _flank_output_with_illegal_marginal_maxima(),
+            motif_length=20,
+            max_length=30,
+            generator=torch.Generator().manual_seed(7),
+            sample=False,
+            min_scaffold_length=31,
+            min_flank_length=2,
+        )
 
 
 def test_iterative_denoise_is_reproducible_and_preserves_motif():

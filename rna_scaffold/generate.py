@@ -292,8 +292,8 @@ def generate_candidates(
     settings = settings or GenerationSettings()
     loaded = load_scaffold_checkpoint(checkpoint, device=device)
     maximum = min(settings.max_length, loaded.max_length)
-    required_context = max(settings.min_scaffold_length, 2 * settings.min_flank_length)
-    if len(motif) + required_context > maximum:
+    minimum_total_length = max(settings.min_scaffold_length, len(motif) + 2 * settings.min_flank_length)
+    if minimum_total_length > maximum:
         raise ValueError("motif cannot fit with the required scaffold context")
 
     torch_device = torch.device(device)
