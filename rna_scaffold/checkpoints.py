@@ -40,6 +40,11 @@ def load_scaffold_checkpoint(
     payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
     if not isinstance(payload, dict):
         raise CheckpointCompatibilityError("checkpoint root must be a mapping")
+    architecture_version = payload.get("architecture_version")
+    if type(architecture_version) is not int or architecture_version != 2:
+        raise CheckpointCompatibilityError(
+            "checkpoint architecture_version 2 is required; the model must be retrained for V2"
+        )
     hparams = payload.get("hyper_parameters")
     state_dict = payload.get("state_dict")
     if not isinstance(hparams, dict):

@@ -176,6 +176,7 @@ class RnaScaffoldLitModule(L.LightningModule):
             dataset.set_epoch(self.current_epoch)
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:
+        checkpoint["architecture_version"] = 2
         checkpoint["pretrained_encoder"] = self.pretrained_metadata
 
     def configure_optimizers(self):
