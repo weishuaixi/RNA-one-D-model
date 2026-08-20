@@ -17,6 +17,7 @@ from rna_scaffold.data import (
     load_sequences,
 )
 from rna_scaffold.records import load_sequence_records
+from rna_scaffold.splits import load_cluster_assignments
 from rna_scaffold.tokenizer import RnaTokenizer
 
 
@@ -26,6 +27,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         tokenizer: RnaTokenizer,
         train_data: str | None = None,
         train_fasta: str | None = None,
+        cluster_manifest: str | None = None,
         task: str = "flank_scaffold",
         motif_length: int = 32,
         min_motif_length: int = 4,
@@ -51,6 +53,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.train_data = Path(train_data or train_fasta or "")
         if not str(self.train_data):
             raise ValueError("Either train_data or train_fasta must be provided.")
+        self.cluster_manifest = Path(cluster_manifest) if cluster_manifest else None
         self.tokenizer = tokenizer
         self.task = task
         self.motif_length = motif_length
@@ -75,9 +78,12 @@ class RnaScaffoldDataModule(L.LightningDataModule):
 
     def setup(self, stage: str | None = None) -> None:
         if self.task == "motif_denoising":
+            if self.cluster_manifest is None:
+                raise ValueError("cluster_manifest must be provided for motif_denoising training")
             records = load_sequence_records(self.train_data, skip_invalid=True)
             datasets, self.split_manifest = build_partitioned_denoising_datasets(
                 records=records,
+                cluster_by_id=load_cluster_assignments(self.cluster_manifest),
                 tokenizer=self.tokenizer,
                 max_length=self.max_target_length,
                 min_motif_length=self.min_motif_length,
@@ -92,6 +98,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
                 max_random_mask_fraction=self.max_random_mask_fraction,
                 mean_span_length=self.mean_span_length,
                 seed=self.seed,
+                val_fraction=self.val_fraction,
             )
             self.train_dataset = datasets["train"]
             self.val_dataset = datasets["validation"]

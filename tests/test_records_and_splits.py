@@ -3,7 +3,12 @@ import torch
 
 from rna_scaffold.data import build_partitioned_denoising_datasets, sample_motif_example
 from rna_scaffold.records import RnaSequenceRecord, load_sequence_records
-from rna_scaffold.splits import build_family_disjoint_manifest, validate_manifest
+from rna_scaffold.splits import (
+    build_cluster_disjoint_manifest,
+    build_family_disjoint_manifest,
+    load_cluster_assignments,
+    validate_manifest,
+)
 from rna_scaffold.tokenizer import RnaTokenizer
 
 
@@ -70,6 +75,70 @@ def test_manifest_rejects_exact_sequence_overlap():
 
     with pytest.raises(ValueError, match="exact sequence overlap"):
         validate_manifest(records, {"train": ["a"], "validation": [], "test": ["b"]})
+
+
+def test_cluster_assignment_tsv_keeps_cluster_members_in_one_partition(tmp_path):
+    assignment_path = tmp_path / "clusters.tsv"
+    assignment_path.write_text(
+        "cluster_id\tsequence_id\tcluster_size\n"
+        "cluster_a\ta\t2\n"
+        "cluster_a\tb\t2\n"
+        "cluster_b\tc\t1\n",
+        encoding="utf-8",
+    )
+    records = [
+        RnaSequenceRecord("a", "AUGCAUGC", "RF1", "unit"),
+        RnaSequenceRecord("b", "AUGCAUGG", "RF2", "unit"),
+        RnaSequenceRecord("c", "CCCCAAAA", "RF3", "unit"),
+    ]
+
+    manifest = build_cluster_disjoint_manifest(
+        records,
+        load_cluster_assignments(assignment_path),
+        seed=7,
+        val_fraction=0.1,
+        test_fraction=0.1,
+    )
+
+    assert manifest.partition_for("a") == manifest.partition_for("b")
+    assert {target_id for members in manifest.partitions.values() for target_id in members} == {"a", "b", "c"}
+
+
+def test_cluster_manifest_rejects_missing_assignments():
+    records = [
+        RnaSequenceRecord("a", "AUGCAUGC", "RF1", "unit"),
+        RnaSequenceRecord("b", "AUGCAUGG", "RF2", "unit"),
+    ]
+
+    with pytest.raises(ValueError, match="incomplete"):
+        build_cluster_disjoint_manifest(records, {"a": "cluster_a"})
+
+
+def test_cluster_assignment_loader_rejects_duplicate_sequence_ids(tmp_path):
+    assignment_path = tmp_path / "clusters.tsv"
+    assignment_path.write_text(
+        "cluster_id\tsequence_id\tcluster_size\n"
+        "cluster_a\ta\t1\n"
+        "cluster_b\ta\t1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate"):
+        load_cluster_assignments(assignment_path)
+
+
+def test_manifest_rejects_cluster_in_two_requested_partitions():
+    records = [
+        RnaSequenceRecord("a", "AUGCAUGC", "RF1", "unit"),
+        RnaSequenceRecord("b", "AUGCAUGG", "RF2", "unit"),
+    ]
+
+    with pytest.raises(ValueError, match="cluster crosses partitions"):
+        validate_manifest(
+            records,
+            {"train": ["a"], "validation": ["b"], "test": []},
+            cluster_by_id={"a": "cluster_a", "b": "cluster_a"},
+        )
 
 
 def test_variable_motif_sampling_is_reproducible_and_not_center_only():
@@ -155,6 +224,7 @@ def test_denoising_datasets_use_manifest_instead_of_random_record_split(tmp_path
     records = load_sequence_records(source)
     datasets, manifest = build_partitioned_denoising_datasets(
         records=records,
+        cluster_by_id={"a": "cluster_a", "b": "cluster_a", "c": "cluster_b"},
         tokenizer=RnaTokenizer(),
         min_motif_length=4,
         max_motif_length=6,
@@ -163,6 +233,8 @@ def test_denoising_datasets_use_manifest_instead_of_random_record_split(tmp_path
         min_total_scaffold_length=1,
         max_length=32,
         seed=7,
+        val_fraction=0.1,
+        test_fraction=0.1,
     )
 
     assert manifest.partition_for("a") == manifest.partition_for("b")

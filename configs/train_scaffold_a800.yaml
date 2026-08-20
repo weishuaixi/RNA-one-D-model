@@ -7,7 +7,8 @@ wandb:
   log_model: false
 
 data:
-  train_data: "/home/weisx/workdir/igem one-model/stanford-rna-3d-folding-data/train_sequences.csv"
+  train_data: data/processed/rna_merged_mmseqs80.csv
+  cluster_manifest: outputs/mmseqs80_search/rna80_connected_components.tsv
   task: motif_denoising
   min_motif_length: 4
   max_motif_length:

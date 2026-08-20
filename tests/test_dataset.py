@@ -145,10 +145,30 @@ def test_denoising_dataset_builds_joint_flank_canvas_and_preserves_motif():
     assert item["input_ids"][motif_positions].tolist() == (
         item["target_token_ids"][motif_positions].tolist()
     )
-    assert item["target_length"].item() == len(record.sequence)
-    assert item["motif_start"].item() == motif_positions[0].item()
     assert item["target_base_ids"][:4].tolist() == [0, 0, 0, 0]
     assert item["target_base_ids"][len(record.sequence) :].eq(-100).all()
+
+
+def test_denoising_dataset_derives_bilateral_targets_without_v1_target_keys():
+    dataset = RnaMotifDenoisingDataset(
+        records=[RnaSequenceRecord("x", "AACCGGUU", "RF1", "unit")],
+        tokenizer=RnaTokenizer(),
+        max_length=8,
+        min_motif_length=4,
+        max_motif_length=4,
+        motif_length_buckets=None,
+        min_flank_length=2,
+        min_total_scaffold_length=0,
+        preferred_total_scaffold_length=0,
+        seed=9,
+    )
+
+    item = dataset[0]
+
+    assert item["target_left_length"].item() == 2
+    assert item["target_right_length"].item() == 2
+    assert "target_length" not in item
+    assert "motif_start" not in item
 
 
 def test_long_rna_is_retained_and_cropped_reproducibly_per_epoch():
@@ -182,7 +202,7 @@ def test_long_rna_is_retained_and_cropped_reproducibly_per_epoch():
     first_item = first[0]
     second_item = second[0]
     assert len(first) == 1
-    assert first_item["target_length"].item() == 512
+    assert first_item["attention_mask"].sum().item() == 512
     assert first_item["source_start"].item() == second_item["source_start"].item()
 
     first.set_epoch(1)

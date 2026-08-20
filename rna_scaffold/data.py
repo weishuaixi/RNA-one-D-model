@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 from rna_scaffold.tokenizer import RnaTokenizer
 from rna_scaffold.utils import validate_rna_sequence
 from rna_scaffold.records import RnaSequenceRecord
-from rna_scaffold.splits import SplitManifest, build_family_disjoint_manifest
+from rna_scaffold.splits import SplitManifest, build_cluster_disjoint_manifest
 
 DEFAULT_MOTIF_LENGTH_BUCKETS = (
     (4, 15, 0.15),
@@ -281,8 +281,11 @@ class RnaMotifDenoisingDataset(Dataset):
             "fixed_mask": fixed_mask,
             "prediction_mask": prediction_mask,
             "attention_mask": attention_mask,
-            "target_length": torch.tensor(length, dtype=torch.long),
-            "motif_start": torch.tensor(example.motif_start, dtype=torch.long),
+            "target_left_length": torch.tensor(example.motif_start, dtype=torch.long),
+            "target_right_length": torch.tensor(
+                length - example.motif_end,
+                dtype=torch.long,
+            ),
             "source_start": torch.tensor(source_start, dtype=torch.long),
         }
 
@@ -316,6 +319,7 @@ class RnaMotifDenoisingDataset(Dataset):
 
 def build_partitioned_denoising_datasets(
     records: list[RnaSequenceRecord],
+    cluster_by_id: dict[str, str],
     tokenizer: RnaTokenizer,
     max_length: int = 512,
     min_motif_length: int = 4,
@@ -330,8 +334,16 @@ def build_partitioned_denoising_datasets(
     max_random_mask_fraction: float = 0.80,
     mean_span_length: int = 8,
     seed: int = 42,
+    val_fraction: float = 0.1,
+    test_fraction: float = 0.1,
 ) -> tuple[dict[str, RnaMotifDenoisingDataset], SplitManifest]:
-    manifest = build_family_disjoint_manifest(records, seed=seed)
+    manifest = build_cluster_disjoint_manifest(
+        records,
+        cluster_by_id,
+        seed=seed,
+        val_fraction=val_fraction,
+        test_fraction=test_fraction,
+    )
     by_id = {record.target_id: record for record in records}
     datasets = {
         partition: RnaMotifDenoisingDataset(
