@@ -137,9 +137,9 @@ class RnaScaffoldLitModule(L.LightningModule):
             right_length_loss_weight=self.right_length_loss_weight,
             label_smoothing=self.label_smoothing,
         )
-        scaffold_mask = batch.get("prediction_mask")
-        if scaffold_mask is None:
-            scaffold_mask = batch["attention_mask"].bool() & ~batch["fixed_mask"].bool()
+        mutable_positions = batch["attention_mask"].bool() & ~batch["fixed_mask"].bool()
+        prediction_mask = batch.get("prediction_mask")
+        scaffold_mask = prediction_mask.bool() & mutable_positions if prediction_mask is not None else mutable_positions
         token_accuracy = (
             output.token_logits.argmax(dim=-1)[scaffold_mask]
             == batch["target_base_ids"][scaffold_mask]
