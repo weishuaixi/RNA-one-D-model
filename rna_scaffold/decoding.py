@@ -96,6 +96,11 @@ def _filtered_probabilities(logits: torch.Tensor, settings: DecodingSettings) ->
     return torch.softmax(filtered, dim=-1)
 
 
+def _confidence_probabilities(logits: torch.Tensor, settings: DecodingSettings) -> torch.Tensor:
+    """Return unfiltered, temperature-scaled probabilities for remasking ranks."""
+    return torch.softmax(logits.float() / settings.temperature, dim=-1)
+
+
 def _scheduled_mask_count(
     initial_masked_count: int,
     step: int,
@@ -127,6 +132,8 @@ def iterative_denoise(
     if len(motif) < 1 or set(motif) - set("AUCG"):
         raise ValueError("motif must contain only A, U, C, and G")
     motif_end = motif_start + len(motif)
+    if total_length <= len(motif):
+        raise ValueError("canvas must contain at least one scaffold position")
     if total_length > int(model.max_length) or motif_start < 0 or motif_end > total_length:
         raise ValueError("invalid motif coordinates for the requested canvas")
 
@@ -149,11 +156,12 @@ def iterative_denoise(
         output = model(input_ids=canvas, attention_mask=attention)
         probabilities = _filtered_probabilities(output.token_logits[0, scaffold_positions], settings)
         sampled_classes = torch.multinomial(probabilities, 1, generator=generator).squeeze(-1)
-        sampled_probs = probabilities.gather(1, sampled_classes.unsqueeze(-1)).squeeze(-1)
+        confidences = _confidence_probabilities(output.token_logits[0, scaffold_positions], settings)
+        sampled_confidences = confidences.gather(1, sampled_classes.unsqueeze(-1)).squeeze(-1)
         canvas[0, scaffold_positions] = base_token_ids[sampled_classes]
         next_masked_count = _scheduled_mask_count(initial_masked_count, step, settings)
         if next_masked_count:
-            remask_indices = torch.topk(sampled_probs, next_masked_count, largest=False).indices
+            remask_indices = torch.topk(sampled_confidences, next_masked_count, largest=False).indices
             canvas[0, scaffold_positions[remask_indices]] = mask_id
         canvas[0, motif_start:motif_end] = motif_ids
         masked_counts.append(next_masked_count)
