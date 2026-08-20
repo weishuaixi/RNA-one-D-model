@@ -129,20 +129,26 @@ def test_zero_initialized_lora_preserves_original_output():
     )
 
 
-def test_functional_weight_access_includes_lora_delta_and_gradients():
+def test_lora_module_call_applies_dropout_to_inputs_and_backpropagates():
     torch.manual_seed(13)
     base = nn.Linear(5, 4)
-    adapter = LoRALinear(base, rank=2, alpha=4.0, dropout=0.0)
+    adapter = LoRALinear(base, rank=2, alpha=4.0, dropout=0.5)
     with torch.no_grad():
         adapter.lora_A.weight.fill_(0.25)
         adapter.lora_B.weight.fill_(0.5)
     inputs = torch.randn(3, 5)
 
-    base_output = F.linear(inputs, base.weight, base.bias)
-    adapted_output = F.linear(inputs, adapter.weight, adapter.bias)
+    torch.manual_seed(29)
+    dropped_inputs = F.dropout(inputs, p=0.5, training=True)
+    expected = base(inputs) + adapter.scale * adapter.lora_B(adapter.lora_A(dropped_inputs))
+    torch.manual_seed(29)
+
+    adapted_output = adapter(inputs)
     adapted_output.square().mean().backward()
 
-    assert not torch.allclose(adapted_output, base_output)
+    torch.testing.assert_close(adapted_output, expected)
+    assert base.weight.grad is None
+    assert base.bias.grad is None
     assert adapter.lora_A.weight.grad is not None
     assert adapter.lora_B.weight.grad is not None
     assert torch.isfinite(adapter.lora_A.weight.grad).all()
@@ -151,25 +157,109 @@ def test_functional_weight_access_includes_lora_delta_and_gradients():
     assert torch.count_nonzero(adapter.lora_B.weight.grad) > 0
 
 
-def test_functional_weight_access_uses_adapter_weight_dropout():
+def test_lora_input_dropout_is_stochastic_only_in_train_mode():
     base = nn.Linear(5, 4)
     adapter = LoRALinear(base, rank=2, alpha=4.0, dropout=0.5)
     with torch.no_grad():
         adapter.lora_A.weight.fill_(1.0)
         adapter.lora_B.weight.fill_(0.5)
+    inputs = torch.ones(16, 5)
     adapter.train()
 
     torch.manual_seed(17)
-    expected_a = F.dropout(adapter.lora_A.weight, p=0.5, training=True)
-    expected_weight = base.weight + adapter.scale * (adapter.lora_B.weight @ expected_a)
-    torch.manual_seed(17)
+    first_train = adapter(inputs)
+    torch.manual_seed(23)
+    second_train = adapter(inputs)
 
-    torch.testing.assert_close(adapter.weight, expected_weight)
+    assert not torch.allclose(first_train, second_train)
     adapter.eval()
-    torch.testing.assert_close(
-        adapter.weight,
-        base.weight + adapter.scale * (adapter.lora_B.weight @ adapter.lora_A.weight),
-    )
+    first_eval = adapter(inputs)
+    second_eval = adapter(inputs)
+    torch.testing.assert_close(first_eval, second_eval)
+
+
+class TinyFunctionalAttention(nn.Module):
+    """RNA-FM-shaped branch: functional weights by default, modules as fallback."""
+
+    def __init__(self, width: int = 4, heads: int = 2) -> None:
+        super().__init__()
+        self.embed_dim = width
+        self.num_heads = heads
+        self.dropout = 0.0
+        self.enable_torch_version = True
+        self.q_proj = nn.Linear(width, width)
+        self.k_proj = nn.Linear(width, width)
+        self.v_proj = nn.Linear(width, width)
+        self.out_proj = nn.Linear(width, width)
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self.enable_torch_version:
+            output, _ = F.multi_head_attention_forward(
+                hidden,
+                hidden,
+                hidden,
+                self.embed_dim,
+                self.num_heads,
+                torch.empty(0, device=hidden.device, dtype=hidden.dtype),
+                torch.cat((self.q_proj.bias, self.k_proj.bias, self.v_proj.bias)),
+                None,
+                None,
+                False,
+                self.dropout,
+                self.out_proj.weight,
+                self.out_proj.bias,
+                self.training,
+                None,
+                False,
+                None,
+                use_separate_proj_weight=True,
+                q_proj_weight=self.q_proj.weight,
+                k_proj_weight=self.k_proj.weight,
+                v_proj_weight=self.v_proj.weight,
+            )
+            return output
+        combined = self.q_proj(hidden) + self.k_proj(hidden) + self.v_proj(hidden)
+        return self.out_proj(torch.tanh(combined))
+
+
+class TinyFunctionalLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.self_attn = TinyFunctionalAttention()
+
+
+class TinyFunctionalEncoder(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([TinyFunctionalLayer()])
+
+
+def test_rna_fm_functional_attention_switches_to_adapter_aware_module_path():
+    encoder = TinyFunctionalEncoder()
+    attention = encoder.layers[0].self_attn
+    assert attention.enable_torch_version is True
+
+    inject_lora_adapters(encoder, last_n_layers=1, rank=2, alpha=4.0, dropout=0.25)
+    with torch.no_grad():
+        for adapter in attention.modules():
+            if isinstance(adapter, LoRALinear):
+                adapter.lora_A.weight.fill_(0.25)
+                adapter.lora_B.weight.fill_(0.5)
+    inputs = torch.randn(3, 2, 4)
+
+    output = attention(inputs)
+    output.square().mean().backward()
+
+    assert attention.enable_torch_version is False
+    adapters = [module for module in attention.modules() if isinstance(module, LoRALinear)]
+    assert len(adapters) == 4
+    assert all(adapter.base.weight.grad is None for adapter in adapters)
+    assert all(adapter.lora_A.weight.grad is not None for adapter in adapters)
+    assert all(adapter.lora_B.weight.grad is not None for adapter in adapters)
+    assert all(torch.isfinite(adapter.lora_A.weight.grad).all() for adapter in adapters)
+    assert all(torch.isfinite(adapter.lora_B.weight.grad).all() for adapter in adapters)
+    assert all(torch.count_nonzero(adapter.lora_A.weight.grad) > 0 for adapter in adapters)
+    assert all(torch.count_nonzero(adapter.lora_B.weight.grad) > 0 for adapter in adapters)
 
 
 def test_lora_injection_rejects_unsupported_layout_with_candidates():
@@ -332,7 +422,8 @@ def test_lora_checkpoint_metadata_records_adapter_contract(monkeypatch, tmp_path
     assert metadata["lora_rank"] == 3
     assert metadata["lora_alpha"] == 9.0
     assert metadata["lora_dropout"] == 0.25
-    assert metadata["lora_dropout_semantics"] == "adapter_weight"
+    assert metadata["lora_dropout_semantics"] == "input"
+    assert metadata["lora_projection_execution"] == "module_forward"
     assert metadata["lora_last_n_layers"] == 1
     assert metadata["adapter_targets"] == list(encoder._rna_scaffold_lora_targets)
     assert metadata["checkpoint_sha256"] == hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
