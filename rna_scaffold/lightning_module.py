@@ -13,7 +13,6 @@ from rna_scaffold.model import MotifDenoisingTransformer, ScaffoldModelOutput, c
 from rna_scaffold.pretrained import (
     build_pretrained_encoder,
     pretrained_metadata,
-    set_lora_adapter_train_mode,
 )
 
 
@@ -118,14 +117,6 @@ class RnaScaffoldLitModule(L.LightningModule):
         attention_mask: torch.Tensor | None = None,
     ) -> ScaffoldModelOutput:
         return self.model(input_ids=input_ids, attention_mask=attention_mask)
-
-    def train(self, mode: bool = True):
-        super().train(mode)
-        model = getattr(self, "model", None)
-        encoder = getattr(model, "pretrained_encoder", None)
-        if encoder is not None and getattr(encoder, "_rna_scaffold_lora", False):
-            set_lora_adapter_train_mode(encoder, mode)
-        return self
 
     def _step(self, batch: dict[str, torch.Tensor], stage: str) -> dict[str, torch.Tensor]:
         scaffold_output = self(batch["input_ids"], batch["attention_mask"])

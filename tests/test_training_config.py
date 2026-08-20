@@ -1,6 +1,17 @@
 from pathlib import Path
 
 import yaml
+from torch import nn
+
+import rna_scaffold.lightning_module as lightning_module
+from rna_scaffold.lightning_module import RnaScaffoldLitModule
+
+
+class TinyConfiguredEncoder(nn.Module):
+    output_dim = 6
+
+    def forward(self, input_ids, attention_mask):
+        raise AssertionError("configuration construction must not run a forward pass")
 
 
 def test_a800_config_is_accuracy_oriented_and_memory_safe():
@@ -37,9 +48,28 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
     assert config["model"]["pretrained"]["lora_alpha"] == 16.0
     assert config["model"]["pretrained"]["lora_dropout"] == 0.05
     assert config["model"]["pretrained"]["lora_last_n_layers"] == 4
+    assert config["model"]["left_length_loss_weight"] == 0.25
+    assert config["model"]["right_length_loss_weight"] == 0.25
+    assert "length_loss_weight" not in config["model"]
+    assert "position_loss_weight" not in config["model"]
     assert config["model"]["warmup_fraction"] == 0.05
     assert config["model"]["min_lr_fraction"] == 0.02
     assert config["model"]["label_smoothing"] > 0
     assert config["trainer"]["early_stopping_patience"] > 0
     assert config["trainer"]["args"]["precision"] == "bf16-mixed"
     assert config["trainer"]["args"]["accumulate_grad_batches"] >= 2
+
+
+def test_a800_model_config_constructs_lightning_boundary(monkeypatch):
+    config_path = Path(__file__).parents[1] / "configs" / "train_scaffold_a800.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        lightning_module,
+        "build_pretrained_encoder",
+        lambda _: TinyConfiguredEncoder(),
+    )
+
+    module = RnaScaffoldLitModule(vocab_size=12, pad_token_id=0, **config["model"])
+
+    assert module.left_length_loss_weight == 0.25
+    assert module.right_length_loss_weight == 0.25

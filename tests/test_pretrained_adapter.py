@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 import rna_scaffold.pretrained as pretrained
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
@@ -128,6 +129,49 @@ def test_zero_initialized_lora_preserves_original_output():
     )
 
 
+def test_functional_weight_access_includes_lora_delta_and_gradients():
+    torch.manual_seed(13)
+    base = nn.Linear(5, 4)
+    adapter = LoRALinear(base, rank=2, alpha=4.0, dropout=0.0)
+    with torch.no_grad():
+        adapter.lora_A.weight.fill_(0.25)
+        adapter.lora_B.weight.fill_(0.5)
+    inputs = torch.randn(3, 5)
+
+    base_output = F.linear(inputs, base.weight, base.bias)
+    adapted_output = F.linear(inputs, adapter.weight, adapter.bias)
+    adapted_output.square().mean().backward()
+
+    assert not torch.allclose(adapted_output, base_output)
+    assert adapter.lora_A.weight.grad is not None
+    assert adapter.lora_B.weight.grad is not None
+    assert torch.isfinite(adapter.lora_A.weight.grad).all()
+    assert torch.isfinite(adapter.lora_B.weight.grad).all()
+    assert torch.count_nonzero(adapter.lora_A.weight.grad) > 0
+    assert torch.count_nonzero(adapter.lora_B.weight.grad) > 0
+
+
+def test_functional_weight_access_uses_adapter_weight_dropout():
+    base = nn.Linear(5, 4)
+    adapter = LoRALinear(base, rank=2, alpha=4.0, dropout=0.5)
+    with torch.no_grad():
+        adapter.lora_A.weight.fill_(1.0)
+        adapter.lora_B.weight.fill_(0.5)
+    adapter.train()
+
+    torch.manual_seed(17)
+    expected_a = F.dropout(adapter.lora_A.weight, p=0.5, training=True)
+    expected_weight = base.weight + adapter.scale * (adapter.lora_B.weight @ expected_a)
+    torch.manual_seed(17)
+
+    torch.testing.assert_close(adapter.weight, expected_weight)
+    adapter.eval()
+    torch.testing.assert_close(
+        adapter.weight,
+        base.weight + adapter.scale * (adapter.lora_B.weight @ adapter.lora_A.weight),
+    )
+
+
 def test_lora_injection_rejects_unsupported_layout_with_candidates():
     class UnsupportedEncoder(nn.Module):
         def __init__(self) -> None:
@@ -227,9 +271,18 @@ def test_lora_mode_constructs_trainable_adapters(monkeypatch):
     )
 
 
-def test_lora_keeps_base_eval_while_adapter_dropout_trains(monkeypatch):
+def test_core_model_keeps_lora_base_eval_while_adapter_dropout_tracks_mode(monkeypatch):
     monkeypatch.setattr(pretrained, "load_rna_fm", lambda _: TinyRnaFmEncoder(layer_count=2))
-    module = RnaScaffoldLitModule(
+    encoder = build_pretrained_encoder(
+        PretrainedEncoderConfig(
+            kind="rna_fm",
+            mode="lora",
+            lora_rank=2,
+            lora_dropout=0.3,
+            lora_last_n_layers=1,
+        )
+    )
+    model = MotifDenoisingTransformer(
         vocab_size=12,
         pad_token_id=0,
         d_model=8,
@@ -238,21 +291,18 @@ def test_lora_keeps_base_eval_while_adapter_dropout_trains(monkeypatch):
         dim_feedforward=16,
         dropout=0.0,
         max_length=16,
-        pretrained={
-            "kind": "rna_fm",
-            "mode": "lora",
-            "lora_rank": 2,
-            "lora_dropout": 0.3,
-            "lora_last_n_layers": 1,
-        },
+        pretrained_encoder=encoder,
     )
-    encoder = module.model.pretrained_encoder
 
-    module.train()
+    model.train()
 
     assert encoder.training is False
     assert not encoder.layers[-1].base_dropout.training
     assert encoder.layers[-1].self_attn.q_proj.dropout.training
+
+    model.eval()
+
+    assert not encoder.layers[-1].self_attn.q_proj.dropout.training
 
 
 def test_v1_freeze_flag_is_rejected():
@@ -282,6 +332,7 @@ def test_lora_checkpoint_metadata_records_adapter_contract(monkeypatch, tmp_path
     assert metadata["lora_rank"] == 3
     assert metadata["lora_alpha"] == 9.0
     assert metadata["lora_dropout"] == 0.25
+    assert metadata["lora_dropout_semantics"] == "adapter_weight"
     assert metadata["lora_last_n_layers"] == 1
     assert metadata["adapter_targets"] == list(encoder._rna_scaffold_lora_targets)
     assert metadata["checkpoint_sha256"] == hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()

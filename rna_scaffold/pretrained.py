@@ -7,12 +7,19 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 _SUPPORTED_ATTENTION_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "out_proj")
 
 
 class LoRALinear(nn.Module):
-    """Frozen linear projection with a trainable low-rank residual."""
+    """Frozen linear projection with a trainable low-rank effective weight.
+
+    RNA-FM's attention fast path reads ``weight`` and ``bias`` directly instead
+    of calling the projection module. Consequently, dropout regularizes the
+    adapter A weight rather than individual input examples; both execution
+    paths then consume the same effective weight and preserve LoRA gradients.
+    """
 
     def __init__(
         self,
@@ -39,9 +46,17 @@ class LoRALinear(nn.Module):
         nn.init.kaiming_uniform_(self.lora_A.weight, a=5**0.5)
         nn.init.zeros_(self.lora_B.weight)
 
+    @property
+    def weight(self) -> torch.Tensor:
+        adapter_a = self.dropout(self.lora_A.weight)
+        return self.base.weight + self.scale * (self.lora_B.weight @ adapter_a)
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        return self.base.bias
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        residual = self.lora_B(self.lora_A(self.dropout(inputs)))
-        return self.base(inputs) + self.scale * residual
+        return F.linear(inputs, self.weight, self.bias)
 
 
 def inject_lora_adapters(
@@ -227,6 +242,9 @@ def pretrained_metadata(
     metadata = asdict(config)
     checkpoint = Path(config.checkpoint) if config.checkpoint else None
     metadata["checkpoint_sha256"] = _sha256(checkpoint) if checkpoint and checkpoint.is_file() else None
+    metadata["lora_dropout_semantics"] = (
+        "adapter_weight" if config.kind == "rna_fm" and config.mode == "lora" else None
+    )
     metadata["adapter_targets"] = list(
         getattr(encoder, "_rna_scaffold_lora_targets", ()) if encoder is not None else ()
     )

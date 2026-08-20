@@ -2,10 +2,40 @@ import hashlib
 
 import pytest
 import torch
+from torch import nn
 
+import rna_scaffold.pretrained as pretrained
 from rna_scaffold.checkpoints import CheckpointCompatibilityError, load_scaffold_checkpoint
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
+from rna_scaffold.pretrained import LoRALinear
 from rna_scaffold.tokenizer import RnaTokenizer
+
+
+class TinyAttention(nn.Module):
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.q_proj = nn.Linear(width, width)
+        self.k_proj = nn.Linear(width, width)
+        self.v_proj = nn.Linear(width, width)
+        self.out_proj = nn.Linear(width, width)
+
+
+class TinyLayer(nn.Module):
+    def __init__(self, width: int) -> None:
+        super().__init__()
+        self.self_attn = TinyAttention(width)
+
+
+class TinyRnaFmEncoder(nn.Module):
+    output_dim = 6
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(12, self.output_dim)
+        self.layers = nn.ModuleList([TinyLayer(self.output_dim) for _ in range(2)])
+
+    def forward(self, input_ids, attention_mask):
+        return self.embedding(input_ids) * attention_mask.unsqueeze(-1)
 
 
 def _tiny_hparams() -> dict:
@@ -60,6 +90,53 @@ def test_load_scaffold_checkpoint_reconstructs_exact_model(tmp_path):
     assert loaded.checkpoint_sha256 == hashlib.sha256(checkpoint.read_bytes()).hexdigest()
     assert loaded.model.training is False
     assert loaded.tokenizer.vocab_size == RnaTokenizer().vocab_size
+
+
+def test_load_scaffold_checkpoint_strictly_round_trips_lora_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(pretrained, "load_rna_fm", lambda _: TinyRnaFmEncoder())
+    hparams = _tiny_hparams()
+    hparams["pretrained"] = {
+        "kind": "rna_fm",
+        "mode": "lora",
+        "lora_rank": 2,
+        "lora_alpha": 4.0,
+        "lora_dropout": 0.0,
+        "lora_last_n_layers": 1,
+    }
+    module = RnaScaffoldLitModule(**hparams)
+    with torch.no_grad():
+        for adapter in module.modules():
+            if isinstance(adapter, LoRALinear):
+                adapter.lora_A.weight.fill_(0.125)
+                adapter.lora_B.weight.fill_(0.25)
+    expected_adapter_state = {
+        name: value.detach().clone()
+        for name, value in module.state_dict().items()
+        if ".lora_A." in name or ".lora_B." in name
+    }
+    checkpoint = tmp_path / "tiny-lora.ckpt"
+    torch.save(
+        {
+            "architecture_version": 2,
+            "state_dict": module.state_dict(),
+            "hyper_parameters": hparams,
+        },
+        checkpoint,
+    )
+
+    loaded = load_scaffold_checkpoint(checkpoint)
+
+    loaded_encoder = loaded.model.model.pretrained_encoder
+    assert loaded_encoder._rna_scaffold_lora_targets == (
+        "layers.1.self_attn.q_proj",
+        "layers.1.self_attn.k_proj",
+        "layers.1.self_attn.v_proj",
+        "layers.1.self_attn.out_proj",
+    )
+    loaded_state = loaded.model.state_dict()
+    assert expected_adapter_state
+    for name, expected in expected_adapter_state.items():
+        torch.testing.assert_close(loaded_state[name], expected)
 
 
 def test_lightning_checkpoint_metadata_declares_v2_architecture():

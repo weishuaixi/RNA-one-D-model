@@ -7,6 +7,8 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
+from rna_scaffold.pretrained import set_lora_adapter_train_mode
+
 
 @dataclass(frozen=True)
 class ScaffoldModelOutput:
@@ -115,6 +117,10 @@ class MotifDenoisingTransformer(nn.Module):
             self.pretrained_encoder, "_rna_scaffold_frozen", False
         ):
             self.pretrained_encoder.eval()
+        elif self.pretrained_encoder is not None and getattr(
+            self.pretrained_encoder, "_rna_scaffold_lora", False
+        ):
+            set_lora_adapter_train_mode(self.pretrained_encoder, mode)
         return self
 
     def forward(
