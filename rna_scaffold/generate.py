@@ -546,7 +546,11 @@ def write_candidates_jsonl(candidates: Sequence[ScaffoldCandidate], output: str 
                 + "\n"
             )
         for candidate in candidates:
-            handle.write(json.dumps(asdict(candidate), ensure_ascii=False, sort_keys=True) + "\n")
+            row = asdict(candidate)
+            if isinstance(candidates, GeneratedCandidates):
+                row["architecture_version"] = 2
+                row["generation_audit"] = asdict(candidates.audit)
+            handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     temporary.replace(output_path)
 
 
