@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+
 import torch
 
 try:
@@ -9,7 +10,11 @@ except ImportError:  # pragma: no cover
     import pytorch_lightning as L
 
 from rna_scaffold.model import MotifDenoisingTransformer, ScaffoldModelOutput, compute_denoising_losses
-from rna_scaffold.pretrained import build_pretrained_encoder, pretrained_metadata
+from rna_scaffold.pretrained import (
+    build_pretrained_encoder,
+    pretrained_metadata,
+    set_lora_adapter_train_mode,
+)
 
 
 def warmup_cosine_multiplier(
@@ -84,7 +89,6 @@ class RnaScaffoldLitModule(L.LightningModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.pretrained_metadata = pretrained_metadata(pretrained)
         self.pad_token_id = int(pad_token_id)
         self.lr = lr
         self.weight_decay = weight_decay
@@ -94,6 +98,7 @@ class RnaScaffoldLitModule(L.LightningModule):
         self.warmup_fraction = warmup_fraction
         self.min_lr_fraction = min_lr_fraction
         pretrained_encoder = build_pretrained_encoder(pretrained)
+        self.pretrained_metadata = pretrained_metadata(pretrained, pretrained_encoder)
         self.model = MotifDenoisingTransformer(
             vocab_size=vocab_size,
             pad_token_id=pad_token_id,
@@ -113,6 +118,14 @@ class RnaScaffoldLitModule(L.LightningModule):
         attention_mask: torch.Tensor | None = None,
     ) -> ScaffoldModelOutput:
         return self.model(input_ids=input_ids, attention_mask=attention_mask)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        model = getattr(self, "model", None)
+        encoder = getattr(model, "pretrained_encoder", None)
+        if encoder is not None and getattr(encoder, "_rna_scaffold_lora", False):
+            set_lora_adapter_train_mode(encoder, mode)
+        return self
 
     def _step(self, batch: dict[str, torch.Tensor], stage: str) -> dict[str, torch.Tensor]:
         scaffold_output = self(batch["input_ids"], batch["attention_mask"])
@@ -180,7 +193,11 @@ class RnaScaffoldLitModule(L.LightningModule):
         checkpoint["pretrained_encoder"] = self.pretrained_metadata
 
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        optimizer = torch.optim.AdamW(
+            (parameter for parameter in self.parameters() if parameter.requires_grad),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
         total_steps = max(1, int(self.trainer.estimated_stepping_batches))
         scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer,

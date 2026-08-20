@@ -32,7 +32,11 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
     assert config["model"]["num_layers"] >= 12
     assert config["model"]["activation_checkpointing"] is True
     assert config["model"]["pretrained"]["kind"] == "rna_fm"
-    assert config["model"]["pretrained"]["freeze"] is True
+    assert config["model"]["pretrained"]["mode"] == "lora"
+    assert config["model"]["pretrained"]["lora_rank"] == 8
+    assert config["model"]["pretrained"]["lora_alpha"] == 16.0
+    assert config["model"]["pretrained"]["lora_dropout"] == 0.05
+    assert config["model"]["pretrained"]["lora_last_n_layers"] == 4
     assert config["model"]["warmup_fraction"] == 0.05
     assert config["model"]["min_lr_fraction"] == 0.02
     assert config["model"]["label_smoothing"] > 0

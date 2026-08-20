@@ -51,10 +51,14 @@ model:
   max_length: 512
   activation_checkpointing: true
   pretrained:
-    # External frozen feature provider; this is not the scaffold generator.
+    # Leave checkpoint null to use RNA-FM's server-side cached default checkpoint.
     kind: rna_fm
     checkpoint:
-    freeze: true
+    mode: lora
+    lora_rank: 8
+    lora_alpha: 16.0
+    lora_dropout: 0.05
+    lora_last_n_layers: 4
   lr: 0.0002
   weight_decay: 0.05
   length_loss_weight: 0.25
