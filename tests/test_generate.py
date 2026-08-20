@@ -219,7 +219,7 @@ def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths
         return DecodedScaffold(
             sequence="AA" + motif + "AAA",
             normalized_log_probability=-0.5,
-            unresolved_counts=(0,),
+            masked_counts=(0,),
         )
 
     loaded = type(

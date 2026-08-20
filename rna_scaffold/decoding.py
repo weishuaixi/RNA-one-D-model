@@ -15,6 +15,7 @@ class DecodingSettings:
     temperature: float = 1.0
     top_k: int | None = None
     top_p: float = 0.95
+    mask_schedule: str = "linear"
 
     def __post_init__(self) -> None:
         if self.denoise_steps <= 0:
@@ -25,13 +26,20 @@ class DecodingSettings:
             raise ValueError("top_k must be between 1 and 4")
         if not 0 < self.top_p <= 1:
             raise ValueError("top_p must be in (0, 1]")
+        if self.mask_schedule not in {"linear", "cosine"}:
+            raise ValueError("mask_schedule must be 'linear' or 'cosine'")
 
 
 @dataclass(frozen=True)
 class DecodedScaffold:
     sequence: str
     normalized_log_probability: float
-    unresolved_counts: tuple[int, ...]
+    masked_counts: tuple[int, ...]
+
+    @property
+    def unresolved_counts(self) -> tuple[int, ...]:
+        """Compatibility alias for the V1 decoder field name."""
+        return self.masked_counts
 
 
 def select_flank_lengths(
@@ -88,6 +96,22 @@ def _filtered_probabilities(logits: torch.Tensor, settings: DecodingSettings) ->
     return torch.softmax(filtered, dim=-1)
 
 
+def _scheduled_mask_count(
+    initial_masked_count: int,
+    step: int,
+    settings: DecodingSettings,
+) -> int:
+    """Return the deterministic number of scaffold tokens to remask after a pass."""
+    if step == settings.denoise_steps - 1:
+        return 0
+    completed_fraction = (step + 1) / settings.denoise_steps
+    if settings.mask_schedule == "linear":
+        remaining_fraction = 1.0 - completed_fraction
+    else:
+        remaining_fraction = math.cos(completed_fraction * math.pi / 2)
+    return max(0, min(initial_masked_count, math.ceil(initial_masked_count * remaining_fraction)))
+
+
 @torch.inference_mode()
 def iterative_denoise(
     model,
@@ -113,38 +137,34 @@ def iterative_denoise(
     canvas[0, motif_start:motif_end] = motif_ids
     fixed = torch.zeros(total_length, dtype=torch.bool, device=device)
     fixed[motif_start:motif_end] = True
-    unresolved = ~fixed
     attention = torch.ones_like(canvas, dtype=torch.bool)
     base_token_ids = torch.tensor(
         [tokenizer.token_to_id[base] for base in "AUCG"], dtype=torch.long, device=device
     )
-    committed_log_probs = torch.zeros(total_length, dtype=torch.float32, device=device)
-    unresolved_counts = [int(unresolved.sum().item())]
+    scaffold_positions = (~fixed).nonzero(as_tuple=False).squeeze(-1)
+    initial_masked_count = int(scaffold_positions.numel())
+    masked_counts = [initial_masked_count]
 
     for step in range(settings.denoise_steps):
-        if not unresolved.any():
-            break
         output = model(input_ids=canvas, attention_mask=attention)
-        probabilities = _filtered_probabilities(output.token_logits[0, unresolved], settings)
+        probabilities = _filtered_probabilities(output.token_logits[0, scaffold_positions], settings)
         sampled_classes = torch.multinomial(probabilities, 1, generator=generator).squeeze(-1)
         sampled_probs = probabilities.gather(1, sampled_classes.unsqueeze(-1)).squeeze(-1)
-        remaining_steps = settings.denoise_steps - step
-        commit_count = min(
-            int(unresolved.sum().item()),
-            max(1, math.ceil(int(unresolved.sum().item()) / remaining_steps)),
-        )
-        selected = torch.topk(sampled_probs, commit_count).indices
-        unresolved_positions = unresolved.nonzero(as_tuple=False).squeeze(-1)
-        commit_positions = unresolved_positions[selected]
-        canvas[0, commit_positions] = base_token_ids[sampled_classes[selected]]
-        committed_log_probs[commit_positions] = sampled_probs[selected].clamp_min(1e-12).log()
-        unresolved[commit_positions] = False
+        canvas[0, scaffold_positions] = base_token_ids[sampled_classes]
+        next_masked_count = _scheduled_mask_count(initial_masked_count, step, settings)
+        if next_masked_count:
+            remask_indices = torch.topk(sampled_probs, next_masked_count, largest=False).indices
+            canvas[0, scaffold_positions[remask_indices]] = mask_id
         canvas[0, motif_start:motif_end] = motif_ids
-        unresolved_counts.append(int(unresolved.sum().item()))
+        masked_counts.append(next_masked_count)
 
-    if unresolved.any():
+    if masked_counts[-1] != 0:
         raise RuntimeError("denoising steps ended with unresolved scaffold positions")
     sequence = tokenizer.decode(canvas[0].tolist())
-    scaffold_mask = ~fixed
-    normalized = float(committed_log_probs[scaffold_mask].mean().item())
-    return DecodedScaffold(sequence, normalized, tuple(unresolved_counts))
+    final_output = model(input_ids=canvas, attention_mask=attention)
+    final_probabilities = torch.softmax(final_output.token_logits[0, scaffold_positions].float(), dim=-1)
+    final_token_ids = canvas[0, scaffold_positions]
+    final_classes = final_token_ids.unsqueeze(-1).eq(base_token_ids).nonzero(as_tuple=False)[:, 1]
+    final_log_probs = final_probabilities.gather(1, final_classes.unsqueeze(-1)).squeeze(-1).clamp_min(1e-12).log()
+    normalized = float(final_log_probs.mean().item())
+    return DecodedScaffold(sequence, normalized, tuple(masked_counts))
