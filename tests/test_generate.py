@@ -3,8 +3,12 @@ import torch
 
 from rna_scaffold.decoding import DecodedScaffold
 from rna_scaffold.generate import (
+    CandidateDiversityDecision,
+    CandidateGenerationAudit,
     GenerationSettings,
+    GeneratedCandidates,
     RnaTrainingPrior,
+    assess_candidate_diversity,
     build_auto_masked_scaffold_prompts,
     build_motif_scaffold_sequence,
     build_random_natural_scaffold_result,
@@ -275,3 +279,100 @@ def test_markov_baseline_can_follow_training_length_distribution(tmp_path):
 def test_generation_settings_reject_invalid_sampling_values():
     with pytest.raises(ValueError, match="num_candidates"):
         GenerationSettings(num_candidates=0)
+
+
+def test_candidate_diversity_policy_reports_each_rejection_reason_and_acceptance():
+    accepted = ["AUGCGGAU"]
+
+    duplicate = assess_candidate_diversity("AUGCGGAU", accepted, GenerationSettings(num_candidates=1))
+    near_duplicate = assess_candidate_diversity(
+        "AUGCGGAC",
+        accepted,
+        GenerationSettings(num_candidates=1, min_normalized_edit_distance=0.25),
+    )
+    kmer_similar = assess_candidate_diversity(
+        "AUGCAGAU",
+        accepted,
+        GenerationSettings(num_candidates=1, max_kmer_similarity=0.2, kmer_size=2),
+    )
+    homopolymer = assess_candidate_diversity(
+        "AAAAUGCG",
+        [],
+        GenerationSettings(num_candidates=1, max_homopolymer_run=3),
+    )
+    acceptable = assess_candidate_diversity("AUGCUGCA", accepted, GenerationSettings(num_candidates=1))
+
+    assert duplicate == CandidateDiversityDecision(False, "duplicate", {})
+    assert near_duplicate.reason == "near_duplicate"
+    assert kmer_similar.reason == "kmer_similarity"
+    assert homopolymer.reason == "homopolymer"
+    assert acceptable == CandidateDiversityDecision(True, "accepted", {})
+
+
+def test_gc_bounds_are_soft_metadata_unless_explicitly_enforced():
+    soft = assess_candidate_diversity(
+        "GGGGGGGG",
+        [],
+        GenerationSettings(num_candidates=1, gc_min=0.25, gc_max=0.75),
+    )
+    hard = assess_candidate_diversity(
+        "GGGGGGGG",
+        [],
+        GenerationSettings(num_candidates=1, gc_min=0.25, gc_max=0.75, enforce_gc_bounds=True),
+    )
+
+    assert soft.accepted
+    assert soft.reason == "accepted"
+    assert soft.metadata == {"gc_in_soft_range": False, "gc_soft_penalty": 0.25}
+    assert hard == CandidateDiversityDecision(False, "gc_out_of_bounds", {})
+
+
+def test_generation_shortfall_is_audited_after_bounded_duplicate_attempts(monkeypatch):
+    class PlacementModel(torch.nn.Module):
+        max_length = 8
+
+        def __init__(self):
+            super().__init__()
+            self.model = torch.nn.Identity()
+
+        def forward(self, input_ids, attention_mask=None):
+            token_logits = torch.zeros((1, input_ids.shape[1], 4))
+            left_length_logits = torch.full((1, 9), -100.0)
+            right_length_logits = torch.full((1, 9), -100.0)
+            left_length_logits[0, 2] = 100.0
+            right_length_logits[0, 2] = 100.0
+            return ScaffoldModelOutput(token_logits, left_length_logits, right_length_logits)
+
+    loaded = type(
+        "Loaded",
+        (),
+        {
+            "model": PlacementModel(),
+            "tokenizer": RnaTokenizer(),
+            "max_length": 8,
+            "checkpoint_sha256": "test-checkpoint",
+        },
+    )()
+    monkeypatch.setattr("rna_scaffold.checkpoints.load_scaffold_checkpoint", lambda checkpoint, device: loaded)
+    monkeypatch.setattr(
+        "rna_scaffold.decoding.iterative_denoise",
+        lambda *args, **kwargs: DecodedScaffold("AAGCGGUU", -0.5, (0,)),
+    )
+
+    result = generate_candidates(
+        checkpoint="ignored.ckpt",
+        motif="GCGG",
+        settings=GenerationSettings(num_candidates=2, max_attempts=3, min_scaffold_length=1, seed=7),
+    )
+
+    assert isinstance(result, GeneratedCandidates)
+    assert len(result) == 1
+    assert result[0].full_sequence == "AAGCGGUU"
+    assert result[0].status == "shortfall"
+    assert result.audit == CandidateGenerationAudit(
+        requested=2,
+        max_attempts=3,
+        attempted=3,
+        accepted=1,
+        rejected={"duplicate": 2},
+    )

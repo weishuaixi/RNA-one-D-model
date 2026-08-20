@@ -50,6 +50,7 @@ def select_flank_lengths(
     sample: bool = True,
     min_scaffold_length: int = 1,
     min_flank_length: int = 0,
+    excluded_pairs: set[tuple[int, int]] | None = None,
 ) -> tuple[int, int]:
     if output.left_length_logits.shape[0] != 1 or output.right_length_logits.shape[0] != 1:
         raise ValueError("flank-length selection currently requires batch size one")
@@ -72,6 +73,14 @@ def select_flank_lengths(
     ]
     if legal_pairs.numel() == 0:
         raise ValueError("motif cannot fit within the requested maximum length")
+    if excluded_pairs:
+        allowed = torch.tensor(
+            [tuple(int(length) for length in pair.tolist()) not in excluded_pairs for pair in legal_pairs],
+            device=legal_pairs.device,
+            dtype=torch.bool,
+        )
+        if allowed.any():
+            legal_pairs = legal_pairs[allowed]
     pair_scores = left_log_probs[legal_pairs[:, 0]] + right_log_probs[legal_pairs[:, 1]]
     if sample:
         probabilities = torch.softmax(pair_scores, dim=0)

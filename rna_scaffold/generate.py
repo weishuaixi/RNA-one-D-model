@@ -4,6 +4,7 @@ import json
 import math
 import random
 from collections import Counter
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -116,6 +117,14 @@ class GenerationSettings:
     top_p: float = 0.95
     denoise_steps: int = 12
     max_attempt_multiplier: int = 8
+    max_attempts: int | None = None
+    min_normalized_edit_distance: float = 0.0
+    max_kmer_similarity: float | None = None
+    kmer_size: int = 5
+    max_homopolymer_run: int | None = None
+    gc_min: float | None = None
+    gc_max: float | None = None
+    enforce_gc_bounds: bool = False
     min_scaffold_length: int = 8
     min_flank_length: int = 2
 
@@ -126,6 +135,22 @@ class GenerationSettings:
             raise ValueError("max_length must be at least 5")
         if self.max_attempt_multiplier <= 0:
             raise ValueError("max_attempt_multiplier must be positive")
+        if self.max_attempts is not None and self.max_attempts <= 0:
+            raise ValueError("max_attempts must be positive")
+        if not 0 <= self.min_normalized_edit_distance <= 1:
+            raise ValueError("min_normalized_edit_distance must be in [0, 1]")
+        if self.max_kmer_similarity is not None and not 0 <= self.max_kmer_similarity <= 1:
+            raise ValueError("max_kmer_similarity must be in [0, 1]")
+        if self.kmer_size <= 0:
+            raise ValueError("kmer_size must be positive")
+        if self.max_homopolymer_run is not None and self.max_homopolymer_run <= 0:
+            raise ValueError("max_homopolymer_run must be positive")
+        if self.gc_min is not None and not 0 <= self.gc_min <= 1:
+            raise ValueError("gc_min must be in [0, 1]")
+        if self.gc_max is not None and not 0 <= self.gc_max <= 1:
+            raise ValueError("gc_max must be in [0, 1]")
+        if self.gc_min is not None and self.gc_max is not None and self.gc_min > self.gc_max:
+            raise ValueError("gc_min must not exceed gc_max")
         if self.min_scaffold_length < 1:
             raise ValueError("min_scaffold_length must be positive")
         if self.min_flank_length < 0:
@@ -152,6 +177,39 @@ class ScaffoldCandidate:
     valid: bool
     status: str
     generation_settings: dict = field(default_factory=dict)
+    architecture_version: int = 2
+    generation_audit: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CandidateDiversityDecision:
+    accepted: bool
+    reason: str
+    metadata: dict[str, float | bool]
+
+
+@dataclass(frozen=True)
+class CandidateGenerationAudit:
+    requested: int
+    max_attempts: int
+    attempted: int
+    accepted: int
+    rejected: dict[str, int]
+
+
+@dataclass(frozen=True)
+class GeneratedCandidates(Sequence[ScaffoldCandidate]):
+    candidates: list[ScaffoldCandidate]
+    audit: CandidateGenerationAudit
+
+    def __len__(self) -> int:
+        return len(self.candidates)
+
+    def __getitem__(self, index: int) -> ScaffoldCandidate:
+        return self.candidates[index]
+
+    def __iter__(self) -> Iterator[ScaffoldCandidate]:
+        return iter(self.candidates)
 
 
 def build_auto_masked_scaffold_prompts(
@@ -276,12 +334,69 @@ def _sequence_metrics(sequence: str) -> tuple[float, int, float]:
     return gc_fraction, maximum_run, entropy
 
 
+def _normalized_edit_distance(left: str, right: str) -> float:
+    """Levenshtein distance scaled by the longer candidate length."""
+    if not left and not right:
+        return 0.0
+    previous = list(range(len(right) + 1))
+    for left_index, left_base in enumerate(left, start=1):
+        current = [left_index]
+        for right_index, right_base in enumerate(right, start=1):
+            current.append(min(
+                previous[right_index] + 1,
+                current[right_index - 1] + 1,
+                previous[right_index - 1] + (left_base != right_base),
+            ))
+        previous = current
+    return previous[-1] / max(len(left), len(right))
+
+
+def _kmer_similarity(left: str, right: str, k: int) -> float:
+    left_kmers = {left[index:index + k] for index in range(max(0, len(left) - k + 1))}
+    right_kmers = {right[index:index + k] for index in range(max(0, len(right) - k + 1))}
+    if not left_kmers and not right_kmers:
+        return 1.0
+    return len(left_kmers & right_kmers) / len(left_kmers | right_kmers)
+
+
+def _gc_metadata(gc_fraction: float, settings: GenerationSettings) -> dict[str, float | bool]:
+    if settings.gc_min is None and settings.gc_max is None:
+        return {}
+    lower_distance = max(0.0, (settings.gc_min or 0.0) - gc_fraction)
+    upper_distance = max(0.0, gc_fraction - (settings.gc_max if settings.gc_max is not None else 1.0))
+    return {"gc_in_soft_range": not (lower_distance or upper_distance), "gc_soft_penalty": lower_distance + upper_distance}
+
+
+def assess_candidate_diversity(
+    sequence: str,
+    accepted_sequences: Sequence[str],
+    settings: GenerationSettings,
+) -> CandidateDiversityDecision:
+    """Pure, ordered diversity policy for one proposed RNA sequence."""
+    if sequence in accepted_sequences:
+        return CandidateDiversityDecision(False, "duplicate", {})
+    if any(_normalized_edit_distance(sequence, accepted) < settings.min_normalized_edit_distance for accepted in accepted_sequences):
+        return CandidateDiversityDecision(False, "near_duplicate", {})
+    if settings.max_kmer_similarity is not None and any(
+        _kmer_similarity(sequence, accepted, settings.kmer_size) > settings.max_kmer_similarity
+        for accepted in accepted_sequences
+    ):
+        return CandidateDiversityDecision(False, "kmer_similarity", {})
+    gc_fraction, maximum_run, _ = _sequence_metrics(sequence)
+    if settings.max_homopolymer_run is not None and maximum_run > settings.max_homopolymer_run:
+        return CandidateDiversityDecision(False, "homopolymer", {})
+    metadata = _gc_metadata(gc_fraction, settings)
+    if settings.enforce_gc_bounds and metadata and not metadata["gc_in_soft_range"]:
+        return CandidateDiversityDecision(False, "gc_out_of_bounds", {})
+    return CandidateDiversityDecision(True, "accepted", metadata)
+
+
 def generate_candidates(
     checkpoint: str | Path,
     motif: str,
     settings: GenerationSettings | None = None,
     device: str | torch.device = "cpu",
-) -> list[ScaffoldCandidate]:
+) -> GeneratedCandidates:
     """Generate unique motif-preserving candidates with the learned checkpoint."""
     from rna_scaffold.checkpoints import load_scaffold_checkpoint
     from rna_scaffold.decoding import DecodingSettings, iterative_denoise, select_flank_lengths
@@ -309,14 +424,17 @@ def generate_candidates(
         top_p=settings.top_p,
     )
     candidates: list[ScaffoldCandidate] = []
-    seen: set[str] = set()
-    max_attempts = settings.num_candidates * settings.max_attempt_multiplier
+    max_attempts = settings.max_attempts or settings.num_candidates * settings.max_attempt_multiplier
+    attempted_pairs: set[tuple[int, int]] = set()
+    rejected: Counter[str] = Counter()
+    attempts = 0
     loaded.model.eval()
     with torch.inference_mode():
         placement_output = loaded.model(motif_input, motif_attention)
         for _ in range(max_attempts):
             if len(candidates) >= settings.num_candidates:
                 break
+            attempts += 1
             left_length, right_length = select_flank_lengths(
                 placement_output,
                 motif_length=len(motif),
@@ -325,7 +443,9 @@ def generate_candidates(
                 sample=True,
                 min_scaffold_length=settings.min_scaffold_length,
                 min_flank_length=settings.min_flank_length,
+                excluded_pairs=attempted_pairs,
             )
+            attempted_pairs.add((left_length, right_length))
             total_length = left_length + len(motif) + right_length
             motif_start = left_length
             decoded = iterative_denoise(
@@ -338,9 +458,10 @@ def generate_candidates(
                 generator,
                 device=torch_device,
             )
-            if decoded.sequence in seen:
+            decision = assess_candidate_diversity(decoded.sequence, [candidate.full_sequence for candidate in candidates], settings)
+            if not decision.accepted:
+                rejected[decision.reason] += 1
                 continue
-            seen.add(decoded.sequence)
             motif_end = motif_start + len(motif)
             preserved = decoded.sequence[motif_start:motif_end] == motif
             valid = preserved and validate_rna_sequence(decoded.sequence)
@@ -367,14 +488,25 @@ def generate_candidates(
                     generation_settings=asdict(settings),
                 )
             )
-    if len(candidates) < settings.num_candidates:
-        candidates = [
-            candidate
-            if candidate.status != "ok"
-            else ScaffoldCandidate(**{**asdict(candidate), "status": "shortfall"})
-            for candidate in candidates
-        ]
-    return candidates
+    audit = CandidateGenerationAudit(
+        requested=settings.num_candidates,
+        max_attempts=max_attempts,
+        attempted=attempts,
+        accepted=len(candidates),
+        rejected=dict(sorted(rejected.items())),
+    )
+    status = "ok" if len(candidates) >= settings.num_candidates else "shortfall"
+    candidates = [
+        ScaffoldCandidate(
+            **{
+                **asdict(candidate),
+                "status": candidate.status if candidate.status != "ok" else status,
+                "generation_audit": asdict(audit),
+            }
+        )
+        for candidate in candidates
+    ]
+    return GeneratedCandidates(candidates, audit)
 
 
 def generate_rna_sequence(
@@ -395,21 +527,37 @@ def generate_rna_sequence(
     return max(candidates, key=lambda candidate: candidate.normalized_log_probability).full_sequence
 
 
-def write_candidates_jsonl(candidates: list[ScaffoldCandidate], output: str | Path) -> None:
+def write_candidates_jsonl(candidates: Sequence[ScaffoldCandidate], output: str | Path) -> None:
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        if isinstance(candidates, GeneratedCandidates) and not candidates:
+            handle.write(
+                json.dumps(
+                    {
+                        "record_type": "generation_metadata",
+                        "architecture_version": 2,
+                        "generation_audit": asdict(candidates.audit),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                + "\n"
+            )
         for candidate in candidates:
             handle.write(json.dumps(asdict(candidate), ensure_ascii=False, sort_keys=True) + "\n")
     temporary.replace(output_path)
 
 
-def write_candidates_fasta(candidates: list[ScaffoldCandidate], output: str | Path) -> None:
+def write_candidates_fasta(candidates: Sequence[ScaffoldCandidate], output: str | Path) -> None:
     output_path = Path(output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        if isinstance(candidates, GeneratedCandidates):
+            handle.write('; ' + json.dumps({"architecture_version": 2}, sort_keys=True) + "\n")
+            handle.write('; ' + json.dumps({"generation_audit": asdict(candidates.audit)}, sort_keys=True) + "\n")
         for candidate in candidates:
             handle.write(f">{candidate.candidate_id}\n{candidate.full_sequence}\n")
     temporary.replace(output_path)

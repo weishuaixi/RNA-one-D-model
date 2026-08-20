@@ -2,9 +2,13 @@
 
 from rna_scaffold.data import MaskedScaffoldExample, RnaMaskedScaffoldDataset
 from rna_scaffold.generate import (
+    CandidateDiversityDecision,
+    CandidateGenerationAudit,
     GenerationSettings,
+    GeneratedCandidates,
     MaskedScaffoldPrompt,
     ScaffoldCandidate,
+    assess_candidate_diversity,
     build_auto_masked_scaffold_prompts,
     build_motif_scaffold_sequence,
     build_random_natural_scaffold_result,
@@ -18,6 +22,10 @@ from rna_scaffold.utils import complementarity_rate, reverse_complement, validat
 
 __all__ = [
     "GenerationSettings",
+    "GeneratedCandidates",
+    "CandidateDiversityDecision",
+    "CandidateGenerationAudit",
+    "assess_candidate_diversity",
     "MaskedScaffoldExample",
     "MaskedScaffoldPrompt",
     "RnaMaskedScaffoldDataset",

@@ -22,7 +22,10 @@ def main() -> None:
     with Path(args.input).open(encoding="utf-8") as handle:
         for line in handle:
             if line.strip():
-                candidates.append(ScaffoldCandidate(**json.loads(line)))
+                row = json.loads(line)
+                if row.get("record_type") == "generation_metadata":
+                    continue
+                candidates.append(ScaffoldCandidate(**row))
     folds = {
         candidate.candidate_id: run_rnafold(
             candidate.full_sequence,
