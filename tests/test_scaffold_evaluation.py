@@ -36,6 +36,28 @@ def test_training_prior_rejects_unsupported_markov_order():
         prior.sample_sequence(4, random.Random(7), order=3)
 
 
+def test_training_prior_prefix_continues_second_order_context():
+    prior = RnaTrainingPrior.from_sequences(["AAGCGGUU"] * 20)
+
+    try:
+        generated = prior.sample_sequence(2, random.Random(4), order=2, prefix="AAGCGG")
+    except TypeError:
+        generated = None
+
+    assert generated == "UU"
+
+
+def test_training_prior_reverse_direction_conditions_left_boundary():
+    prior = RnaTrainingPrior.from_sequences(["AAGCGGUU"] * 20)
+
+    try:
+        outward = prior.sample_sequence(2, random.Random(4), order=2, prefix="GGCG", direction="reverse")
+    except TypeError:
+        outward = None
+
+    assert outward == "AA"
+
+
 def test_candidate_summary_counts_invalid_and_duplicate_outputs():
     rows = [
         CandidateMetric("m1", "a", True, True, 20, 0.5, None),
@@ -114,6 +136,18 @@ def test_candidate_summary_aggregates_extended_metrics_without_fabricating_missi
     assert summary.rnafold_ok_rate == pytest.approx(0.5)
     assert summary.mean_rnafold_mfe_kcal_mol == pytest.approx(-2.0)
     assert summary.rnafold_failure_count == 1
+
+
+def test_candidate_summary_excludes_rnafold_not_run_from_attempt_rates_and_failures():
+    rows = [
+        CandidateMetric("m1", "AAAAGCGG", True, True, 8, 0.5, None, rnafold_status="ok"),
+        CandidateMetric("m1", "UUUUGCGG", True, True, 8, 0.5, None, rnafold_status="not_run"),
+    ]
+
+    summary = summarize_candidates(rows)
+
+    assert summary.rnafold_ok_rate == pytest.approx(1.0)
+    assert summary.rnafold_failure_count == 0
 
 
 def test_normalized_edit_distance_has_expected_bounds():

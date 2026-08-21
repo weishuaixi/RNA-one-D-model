@@ -23,10 +23,21 @@ class RnaTrainingPrior:
     transition: dict[str, dict[str, float]]
     initial: dict[str, float]
     second_order_transition: dict[str, dict[str, float]] = field(default_factory=dict)
+    reverse_transition: dict[str, dict[str, float]] = field(default_factory=dict)
+    reverse_initial: dict[str, float] = field(default_factory=dict)
+    reverse_second_order_transition: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @classmethod
     def empty(cls) -> RnaTrainingPrior:
-        return cls(lengths=[], transition={}, initial={}, second_order_transition={})
+        return cls(
+            lengths=[],
+            transition={},
+            initial={},
+            second_order_transition={},
+            reverse_transition={},
+            reverse_initial={},
+            reverse_second_order_transition={},
+        )
 
     @classmethod
     def from_path(cls, path: str | Path) -> RnaTrainingPrior:
@@ -42,6 +53,11 @@ class RnaTrainingPrior:
             left + right: Counter() for left in BASES for right in BASES
         }
         start_counts: Counter[str] = Counter()
+        reverse_pair_counts: dict[str, Counter[str]] = {base: Counter() for base in BASES}
+        reverse_triplet_counts: dict[str, Counter[str]] = {
+            left + right: Counter() for left in BASES for right in BASES
+        }
+        reverse_start_counts: Counter[str] = Counter()
         for raw_sequence in sequences:
             sequence = raw_sequence.strip().upper().replace("T", "U")
             if len(sequence) < 2 or not validate_rna_sequence(sequence):
@@ -52,6 +68,16 @@ class RnaTrainingPrior:
                 pair_counts[left][right] += 1
             for first, second, third in zip(sequence, sequence[1:], sequence[2:]):
                 triplet_counts[first + second][third] += 1
+            reversed_sequence = sequence[::-1]
+            reverse_start_counts[reversed_sequence[0]] += 1
+            for left, right in pairwise(reversed_sequence):
+                reverse_pair_counts[left][right] += 1
+            for first, second, third in zip(
+                reversed_sequence,
+                reversed_sequence[1:],
+                reversed_sequence[2:],
+            ):
+                reverse_triplet_counts[first + second][third] += 1
 
         # Laplace smoothing keeps every base sampleable, including for small
         # or compositionally narrow training files.
@@ -71,15 +97,38 @@ class RnaTrainingPrior:
                 base: (counts.get(base, 0) + 1) / total for base in BASES
             }
 
+        reverse_total_start = sum(reverse_start_counts.values()) + len(BASES)
+        reverse_initial = {
+            base: (reverse_start_counts.get(base, 0) + 1) / reverse_total_start
+            for base in BASES
+        }
+        reverse_transition: dict[str, dict[str, float]] = {}
+        for previous in BASES:
+            total = sum(reverse_pair_counts[previous].values()) + len(BASES)
+            reverse_transition[previous] = {
+                base: (reverse_pair_counts[previous].get(base, 0) + 1) / total
+                for base in BASES
+            }
+        reverse_second_order_transition: dict[str, dict[str, float]] = {}
+        for context, counts in reverse_triplet_counts.items():
+            total = sum(counts.values()) + len(BASES)
+            reverse_second_order_transition[context] = {
+                base: (counts.get(base, 0) + 1) / total for base in BASES
+            }
+
         return cls(
             lengths=lengths,
             transition=transition,
             initial=initial,
             second_order_transition=second_order_transition,
+            reverse_transition=reverse_transition,
+            reverse_initial=reverse_initial,
+            reverse_second_order_transition=reverse_second_order_transition,
         )
 
-    def has_statistics(self) -> bool:
-        return bool(self.lengths) and len(self.transition) == len(BASES)
+    def has_statistics(self, direction: str = "forward") -> bool:
+        transitions = self.transition if direction == "forward" else self.reverse_transition
+        return bool(self.lengths) and len(transitions) == len(BASES)
 
     def sample_total_length(self, motif_length: int, rng: random.Random) -> int | None:
         valid_lengths = [length for length in self.lengths if length > motif_length + 1]
@@ -87,19 +136,48 @@ class RnaTrainingPrior:
             return None
         return rng.choice(valid_lengths)
 
-    def sample_sequence(self, length: int, rng: random.Random, order: int = 1) -> str:
+    def sample_sequence(
+        self,
+        length: int,
+        rng: random.Random,
+        order: int = 1,
+        prefix: str = "",
+        direction: str = "forward",
+    ) -> str:
+        """Sample bases after an optional context, expressed in the selected direction.
+
+        Reverse samples are returned motif-outward and must be reversed by a caller
+        that wants the conventional left-to-right left flank.
+        """
         if order not in {1, 2}:
             raise ValueError("order must be 1 or 2")
+        if direction not in {"forward", "reverse"}:
+            raise ValueError("direction must be 'forward' or 'reverse'")
+        prefix = prefix.strip().upper().replace("T", "U")
+        if prefix and not validate_rna_sequence(prefix):
+            raise ValueError("prefix must contain only A, U, C, and G")
         if length <= 0:
             return ""
-        if not self.has_statistics():
+        if not self.has_statistics(direction):
             return "".join(rng.choice(BASES) for _ in range(length))
-        chars = [self._sample_base(None, rng)]
-        for _ in range(length - 1):
-            probabilities = self.transition.get(chars[-1], {})
-            if order == 2 and len(chars) >= 2:
-                probabilities = self.second_order_transition.get("".join(chars[-2:]), probabilities)
-            chars.append(self._sample_probabilities(probabilities, rng))
+        initial = self.initial if direction == "forward" else self.reverse_initial
+        transition = self.transition if direction == "forward" else self.reverse_transition
+        second_order = (
+            self.second_order_transition
+            if direction == "forward"
+            else self.reverse_second_order_transition
+        )
+        history = list(prefix)
+        chars: list[str] = []
+        for _ in range(length):
+            probabilities = initial
+            if history:
+                probabilities = transition.get(history[-1], {})
+            if order == 2 and len(history) >= 2:
+                probabilities = second_order.get("".join(history[-2:]), probabilities)
+            sampled = self._sample_probabilities(probabilities, rng)
+            chars.append(sampled)
+            history.append(sampled)
         return "".join(chars)
 
     def _sample_base(self, previous: str | None, rng: random.Random) -> str:
@@ -429,6 +507,7 @@ def generate_candidates(
     motif: str,
     settings: GenerationSettings | None = None,
     device: str | torch.device = "cpu",
+    loaded_checkpoint: object | None = None,
 ) -> GeneratedCandidates:
     """Generate unique motif-preserving candidates with the learned checkpoint."""
     from rna_scaffold.checkpoints import load_scaffold_checkpoint
@@ -438,7 +517,11 @@ def generate_candidates(
     if len(motif) < 4 or not validate_rna_sequence(motif):
         raise ValueError("motif must contain at least four A/U/C/G nucleotides")
     settings = settings or GenerationSettings()
-    loaded = load_scaffold_checkpoint(checkpoint, device=device)
+    loaded = (
+        loaded_checkpoint
+        if loaded_checkpoint is not None
+        else load_scaffold_checkpoint(checkpoint, device=device)
+    )
     maximum = min(settings.max_length, loaded.max_length)
     minimum_total_length = max(settings.min_scaffold_length, len(motif) + 2 * settings.min_flank_length)
     if minimum_total_length > maximum:

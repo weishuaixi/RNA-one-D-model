@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from collections import Counter
-from dataclasses import asdict
+from dataclasses import asdict, fields
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -21,8 +21,10 @@ import numpy as np
 import torch
 import yaml
 
+from rna_scaffold.checkpoints import load_scaffold_checkpoint
 from rna_scaffold.evaluation import (
     CandidateMetric,
+    CandidateSummary,
     maximum_homopolymer_run,
     nearest_training_similarity,
     paired_bootstrap_by_motif,
@@ -48,6 +50,39 @@ BOOTSTRAP_METRICS = (
     "mean_normalized_edit_diversity",
     "mean_kmer_diversity",
     "mean_nearest_training_kmer_similarity",
+)
+CANDIDATE_RESULT_FIELDS = (
+    "method",
+    "primary",
+    "motif_id",
+    "candidate_index",
+    "motif_start",
+    "motif_end",
+    "seed",
+    *(field.name for field in fields(CandidateMetric) if field.name != "motif_id"),
+)
+MOTIF_SUMMARY_FIELDS = (
+    "method",
+    "primary",
+    "motif_id",
+    "status",
+    "error_reason",
+    "seed",
+    "rejection_reasons",
+    *(field.name for field in fields(CandidateSummary)),
+)
+MODEL_SUMMARY_FIELDS = (
+    "method",
+    "kind",
+    "primary",
+    "status",
+    "error_reason",
+    "seed",
+    "rejection_reasons",
+    *(field.name for field in fields(CandidateSummary)),
+    "setup_runtime_seconds",
+    "generation_runtime_seconds",
+    "validation_runtime_seconds",
 )
 
 
@@ -95,11 +130,9 @@ def _atomic_write_text(path: Path, content: str) -> None:
             temporary_path.unlink(missing_ok=True)
 
 
-def _csv_text(rows: list[dict[str, Any]]) -> str:
-    if not rows:
-        raise ValueError("benchmark CSV artifacts require at least one row")
+def _csv_text(rows: list[dict[str, Any]], fieldnames: tuple[str, ...]) -> str:
     output = io.StringIO(newline="")
-    writer = csv.DictWriter(output, fieldnames=list(rows[0]), lineterminator="\n")
+    writer = csv.DictWriter(output, fieldnames=fieldnames, lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
     return output.getvalue()
@@ -122,8 +155,24 @@ def _markov(
 ) -> tuple[str, int]:
     scaffold_length = length - len(motif)
     start = rng.randint(1, scaffold_length - 1)
-    left = prior.sample_sequence(start, rng, order=order)
-    right = prior.sample_sequence(scaffold_length - start, rng, order=order)
+    # Generate the left flank from the motif boundary outward using the
+    # reverse-corpus prior, then restore conventional 5'->3' orientation.
+    left_outward = prior.sample_sequence(
+        start,
+        rng,
+        order=order,
+        prefix=motif[::-1],
+        direction="reverse",
+    )
+    left = left_outward[::-1]
+    # The right flank continues the complete left+motif history, so the fixed
+    # motif junction does not reset first- or second-order context.
+    right = prior.sample_sequence(
+        scaffold_length - start,
+        rng,
+        order=order,
+        prefix=left + motif,
+    )
     return left + motif + right, start
 
 
@@ -149,14 +198,8 @@ def _normalise_method_specs(config: dict[str, Any], smoke_test: bool) -> list[di
             raise ValueError("every benchmark method requires a name")
         if method["kind"] not in {"uniform", "markov1", "markov2", "checkpoint"}:
             raise ValueError(f"unknown benchmark method kind: {method['kind']}")
-        if method["kind"] == "checkpoint":
-            if not method.get("checkpoint"):
-                raise ValueError(f"checkpoint method {method['name']!r} requires checkpoint")
-            checkpoint = Path(str(method["checkpoint"]))
-            if not checkpoint.is_file():
-                raise FileNotFoundError(
-                    f"checkpoint for benchmark method {method['name']!r} does not exist: {checkpoint}"
-                )
+        if method["kind"] == "checkpoint" and not method.get("checkpoint"):
+            raise ValueError(f"checkpoint method {method['name']!r} requires checkpoint")
         specs.append(method)
 
     names = [str(method["name"]) for method in specs]
@@ -254,6 +297,7 @@ def _generate_method_motif(
     budget: int,
     seed: int,
     prior: RnaTrainingPrior,
+    loaded_checkpoint: object | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int], int | None]:
     kind = str(method["kind"])
     rng = random.Random(seed)
@@ -281,6 +325,7 @@ def _generate_method_motif(
         motif,
         GenerationSettings(**generation),
         device=device,
+        loaded_checkpoint=loaded_checkpoint,
     )
     peak_memory = int(torch.cuda.max_memory_allocated(device)) if using_cuda else None
     generated = [
@@ -328,7 +373,7 @@ def _rnafold_results(
     for candidate in generated:
         start = candidate["motif_start"]
         if not candidate["sequence"] or start is None or used >= structure_budget:
-            results.append(None)
+            results.append(RnafoldResult("not_run", None, None, None, None, 0.0, None, None))
             continue
         results.append(
             run_rnafold(
@@ -343,6 +388,25 @@ def _rnafold_results(
     return results
 
 
+def _rnafold_run_status(config: dict[str, Any], candidate_rows: list[dict[str, Any]]) -> str:
+    if not (config.get("rnafold") or {}).get("enabled", False):
+        return "disabled"
+    attempted = [
+        str(row["rnafold_status"])
+        for row in candidate_rows
+        if row.get("rnafold_status") not in {None, "not_run"}
+    ]
+    if not attempted:
+        return "not_run"
+    if all(status == "ok" for status in attempted):
+        return "ok"
+    if all(status == "unavailable" for status in attempted):
+        return "unavailable"
+    if any(status == "ok" for status in attempted):
+        return "partial"
+    return "failed"
+
+
 def _paired_bootstrap_artifact(
     motif_summaries: list[dict[str, Any]],
     methods: list[str],
@@ -351,7 +415,12 @@ def _paired_bootstrap_artifact(
 ) -> dict[str, Any]:
     comparison_rows: list[dict[str, Any]] = []
     by_method = {
-        method: {row["motif_id"]: row for row in motif_summaries if row["method"] == method} for method in methods
+        method: {
+            row["motif_id"]: row
+            for row in motif_summaries
+            if row["method"] == method and row["status"] in {"ok", "partial"}
+        }
+        for method in methods
     }
     for left_method, right_method in combinations(methods, 2):
         for metric in BOOTSTRAP_METRICS:
@@ -401,14 +470,14 @@ def _report(
         "",
         ("RNAfold-derived MFE and pairing metrics are a plausibility proxy only; they are not proof of function."),
         "",
-        "| Method | Primary | Status | Valid rate | Unique rate | Edit diversity | Failures | Runtime (s) |",
-        "|---|---:|---|---:|---:|---:|---:|---:|",
+        "| Method | Primary | Status | Valid rate | Unique rate | Edit diversity | Failures | Runtime (s) | Error |",
+        "|---|---:|---|---:|---:|---:|---:|---:|---|",
     ]
     for row in model_summaries:
         method = f"**{row['method']}**" if row["primary"] else row["method"]
         lines.append(
             "| {method} | {primary} | {status} | {valid:.4f} | {unique:.4f} | "
-            "{diversity:.4f} | {failures} | {runtime:.4f} |".format(
+            "{diversity:.4f} | {failures} | {runtime:.4f} | {error} |".format(
                 method=method,
                 primary="yes" if row["primary"] else "no",
                 status=row["status"],
@@ -417,6 +486,7 @@ def _report(
                 diversity=row["mean_normalized_edit_diversity"],
                 failures=row["failure_count"],
                 runtime=row["runtime_seconds"],
+                error=row["error_reason"] or "",
             )
         )
     return "\n".join(lines) + "\n"
@@ -432,7 +502,23 @@ def _software_versions() -> dict[str, str]:
     }
 
 
-def run_benchmark(config_path: Path, output_dir: Path, smoke_test: bool = False) -> None:
+def _require_new_or_empty_output_directory(output_dir: Path) -> None:
+    if not output_dir.exists():
+        return
+    if not output_dir.is_dir():
+        raise ValueError(f"benchmark output path is not a directory: {output_dir}")
+    if next(output_dir.iterdir(), None) is not None:
+        raise ValueError(
+            f"benchmark output directory must be empty; refusing to remove existing files: {output_dir}"
+        )
+
+
+def run_benchmark(
+    config_path: Path,
+    output_dir: Path,
+    smoke_test: bool = False,
+) -> dict[str, Any]:
+    _require_new_or_empty_output_directory(output_dir)
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise TypeError("benchmark configuration must be a mapping")
@@ -453,11 +539,13 @@ def run_benchmark(config_path: Path, output_dir: Path, smoke_test: bool = False)
             primary_name,
         )
     data_sha256 = {} if smoke_test else _data_hashes(config)
-    checkpoint_sha256 = {
-        str(method["name"]): _sha256(Path(str(method["checkpoint"])))
-        for method in method_specs
-        if method["kind"] == "checkpoint"
-    }
+    checkpoint_sha256: dict[str, str | None] = {}
+    for method in method_specs:
+        if method["kind"] != "checkpoint":
+            continue
+        checkpoint = Path(str(method["checkpoint"]))
+        checkpoint_sha256[str(method["name"])] = _sha256(checkpoint) if checkpoint.is_file() else None
+
     training_sequences: list[str] = []
     training_data = config.get("training_data")
     if training_data and not smoke_test:
@@ -474,105 +562,184 @@ def run_benchmark(config_path: Path, output_dir: Path, smoke_test: bool = False)
 
     for method in method_specs:
         method_name = str(method["name"])
+        method_kind = str(method["kind"])
         method_started = time.perf_counter()
+        setup_runtime = 0.0
+        generation_runtime_total = 0.0
+        validation_runtime_total = 0.0
+        method_status = "ok"
+        method_error: str | None = None
+        loaded_checkpoint: object | None = None
         method_metrics: list[CandidateMetric] = []
+        method_candidate_rows: list[dict[str, Any]] = []
+        method_motif_summaries: list[dict[str, Any]] = []
         method_rejections: Counter[str] = Counter()
-        motif_seeds: dict[str, int] = {}
+        motif_seeds = {
+            motif_row["id"]: seed + motif_index * 1000
+            for motif_index, motif_row in enumerate(motifs)
+        }
         method_partial = False
-        for motif_index, motif_row in enumerate(motifs):
-            motif_id = motif_row["id"]
-            motif = motif_row["sequence"]
-            motif_seed = seed + motif_index * 1000
-            motif_seeds[motif_id] = motif_seed
-            length = max(len(motif) + 8, 24)
-            generation_started = time.perf_counter()
-            generated, rejection_counts, peak_memory = _generate_method_motif(
-                method,
-                motif,
-                length,
-                budget,
-                motif_seed,
-                prior,
-            )
-            generation_runtime = time.perf_counter() - generation_started
-            method_rejections.update(rejection_counts)
-            method_partial = method_partial or any(row["failure"] == "generation_shortfall" for row in generated)
-            actual_sequences = [row["sequence"] for row in generated if row["sequence"]]
-            edit_scores, kmer_scores = within_group_diversity(actual_sequences, k=5)
-            actual_index = 0
-            rnafold_results = _rnafold_results(generated, len(motif), config, budget)
-            motif_metrics: list[CandidateMetric] = []
-            per_candidate_runtime = generation_runtime / budget
-            for candidate_index, (generated_row, rnafold_result) in enumerate(zip(generated, rnafold_results)):
-                has_sequence = bool(generated_row["sequence"])
-                edit_diversity = edit_scores[actual_index] if has_sequence else 0.0
-                kmer_diversity = kmer_scores[actual_index] if has_sequence else 0.0
-                if has_sequence:
-                    actual_index += 1
-                metric = _candidate_metric(
-                    motif_id,
-                    motif,
-                    generated_row["sequence"],
-                    generated_row["motif_start"],
-                    training_sequences,
-                    edit_diversity,
-                    kmer_diversity,
-                    per_candidate_runtime,
-                    peak_memory,
-                    generated_row["failure"],
-                    generated_row["rejection_reason"],
-                    rnafold_result,
-                )
-                method_metrics.append(metric)
-                motif_metrics.append(metric)
-                candidate_rows.append(
-                    {
-                        "method": method_name,
-                        "primary": bool(method["primary"]),
-                        "motif_id": motif_id,
-                        "candidate_index": candidate_index,
-                        "motif_start": generated_row["motif_start"],
-                        "motif_end": (
-                            generated_row["motif_start"] + len(motif)
-                            if generated_row["motif_start"] is not None
-                            else None
-                        ),
-                        "seed": motif_seed,
-                        **asdict(metric),
-                    }
-                )
-            motif_summaries.append(
+
+        if method_kind == "checkpoint":
+            checkpoint = Path(str(method["checkpoint"]))
+            setup_started = time.perf_counter()
+            if not checkpoint.is_file():
+                method_status = "unavailable"
+                method_error = f"checkpoint for benchmark method {method_name!r} does not exist: {checkpoint}"
+            else:
+                try:
+                    loaded_checkpoint = load_scaffold_checkpoint(
+                        str(checkpoint),
+                        device=str(method.get("device", "cpu")),
+                    )
+                # A third-party/deserialization loader can raise several exception
+                # types; every ordinary failure must become a terminal method row.
+                except Exception as error:  # noqa: BLE001
+                    method_status = "failed"
+                    method_error = f"{type(error).__name__}: {error}"
+            setup_runtime = time.perf_counter() - setup_started
+
+        if method_status == "ok":
+            try:
+                for motif_index, motif_row in enumerate(motifs):
+                    motif_id = motif_row["id"]
+                    motif = motif_row["sequence"]
+                    motif_seed = motif_seeds[motif_id]
+                    length = max(len(motif) + 8, 24)
+                    generation_started = time.perf_counter()
+                    generated, rejection_counts, peak_memory = _generate_method_motif(
+                        method,
+                        motif,
+                        length,
+                        budget,
+                        motif_seed,
+                        prior,
+                        loaded_checkpoint=loaded_checkpoint,
+                    )
+                    generation_runtime = time.perf_counter() - generation_started
+                    generation_runtime_total += generation_runtime
+                    method_rejections.update(rejection_counts)
+                    motif_partial = any(row["failure"] == "generation_shortfall" for row in generated)
+                    method_partial = method_partial or motif_partial
+                    actual_sequences = [row["sequence"] for row in generated if row["sequence"]]
+                    edit_scores, kmer_scores = within_group_diversity(actual_sequences, k=5)
+                    actual_index = 0
+                    validation_started = time.perf_counter()
+                    rnafold_results = _rnafold_results(generated, len(motif), config, budget)
+                    validation_runtime_total += time.perf_counter() - validation_started
+                    motif_metrics: list[CandidateMetric] = []
+                    per_candidate_runtime = generation_runtime / budget
+                    for candidate_index, (generated_row, rnafold_result) in enumerate(
+                        zip(generated, rnafold_results)
+                    ):
+                        has_sequence = bool(generated_row["sequence"])
+                        edit_diversity = edit_scores[actual_index] if has_sequence else 0.0
+                        kmer_diversity = kmer_scores[actual_index] if has_sequence else 0.0
+                        if has_sequence:
+                            actual_index += 1
+                        metric = _candidate_metric(
+                            motif_id,
+                            motif,
+                            generated_row["sequence"],
+                            generated_row["motif_start"],
+                            training_sequences,
+                            edit_diversity,
+                            kmer_diversity,
+                            per_candidate_runtime,
+                            peak_memory,
+                            generated_row["failure"],
+                            generated_row["rejection_reason"],
+                            rnafold_result,
+                        )
+                        method_metrics.append(metric)
+                        motif_metrics.append(metric)
+                        method_candidate_rows.append(
+                            {
+                                "method": method_name,
+                                "primary": bool(method["primary"]),
+                                "motif_id": motif_id,
+                                "candidate_index": candidate_index,
+                                "motif_start": generated_row["motif_start"],
+                                "motif_end": (
+                                    generated_row["motif_start"] + len(motif)
+                                    if generated_row["motif_start"] is not None
+                                    else None
+                                ),
+                                "seed": motif_seed,
+                                **asdict(metric),
+                            }
+                        )
+                    method_motif_summaries.append(
+                        {
+                            "method": method_name,
+                            "primary": bool(method["primary"]),
+                            "motif_id": motif_id,
+                            "status": "partial" if motif_partial else "ok",
+                            "error_reason": None,
+                            "seed": motif_seed,
+                            "rejection_reasons": json.dumps(rejection_counts, sort_keys=True),
+                            **asdict(summarize_candidates(motif_metrics)),
+                        }
+                    )
+            except Exception as error:
+                if method_kind != "checkpoint":
+                    raise
+                method_status = "failed"
+                method_error = f"{type(error).__name__}: {error}"
+                method_metrics.clear()
+                method_candidate_rows.clear()
+                method_motif_summaries.clear()
+                method_rejections.clear()
+
+        if method_status in {"unavailable", "failed"}:
+            empty_summary = asdict(summarize_candidates([]))
+            method_motif_summaries = [
                 {
                     "method": method_name,
                     "primary": bool(method["primary"]),
-                    "motif_id": motif_id,
-                    "seed": motif_seed,
-                    "rejection_reasons": json.dumps(rejection_counts, sort_keys=True),
-                    **asdict(summarize_candidates(motif_metrics)),
+                    "motif_id": motif_row["id"],
+                    "status": method_status,
+                    "error_reason": method_error,
+                    "seed": motif_seeds[motif_row["id"]],
+                    "rejection_reasons": "{}",
+                    **empty_summary,
                 }
-            )
+                for motif_row in motifs
+            ]
+        elif method_partial:
+            method_status = "partial"
+
+        candidate_rows.extend(method_candidate_rows)
+        motif_summaries.extend(method_motif_summaries)
         method_runtime = time.perf_counter() - method_started
-        status = "partial" if method_partial else "ok"
         method_summary = {
             "method": method_name,
-            "kind": str(method["kind"]),
+            "kind": method_kind,
             "primary": bool(method["primary"]),
-            "status": status,
+            "status": method_status,
+            "error_reason": method_error,
             "seed": seed,
             "rejection_reasons": json.dumps(dict(sorted(method_rejections.items())), sort_keys=True),
             **asdict(summarize_candidates(method_metrics)),
+            "setup_runtime_seconds": setup_runtime,
+            "generation_runtime_seconds": generation_runtime_total,
+            "validation_runtime_seconds": validation_runtime_total,
         }
         method_summary["runtime_seconds"] = method_runtime
         model_summaries.append(method_summary)
         manifest_methods.append(
             {
                 "name": method_name,
-                "kind": str(method["kind"]),
+                "kind": method_kind,
                 "primary": bool(method["primary"]),
-                "status": status,
+                "status": method_status,
+                "error_reason": method_error,
                 "seed": seed,
                 "motif_seeds": motif_seeds,
                 "runtime_seconds": method_runtime,
+                "setup_runtime_seconds": setup_runtime,
+                "generation_runtime_seconds": generation_runtime_total,
+                "validation_runtime_seconds": validation_runtime_total,
                 "checkpoint_sha256": checkpoint_sha256.get(method_name),
                 "rejection_reasons": dict(sorted(method_rejections.items())),
             }
@@ -588,9 +755,9 @@ def run_benchmark(config_path: Path, output_dir: Path, smoke_test: bool = False)
 
     output_dir.mkdir(parents=True, exist_ok=True)
     artifact_content = {
-        "candidate_results.csv": _csv_text(candidate_rows),
-        "motif_summary.csv": _csv_text(motif_summaries),
-        "model_summary.csv": _csv_text(model_summaries),
+        "candidate_results.csv": _csv_text(candidate_rows, CANDIDATE_RESULT_FIELDS),
+        "motif_summary.csv": _csv_text(motif_summaries, MOTIF_SUMMARY_FIELDS),
+        "model_summary.csv": _csv_text(model_summaries, MODEL_SUMMARY_FIELDS),
         "paired_bootstrap.json": json.dumps(paired_artifact, indent=2, sort_keys=True) + "\n",
         "benchmark_report.md": report,
     }
@@ -599,13 +766,21 @@ def run_benchmark(config_path: Path, output_dir: Path, smoke_test: bool = False)
 
     runtime_seconds = time.perf_counter() - started
     software_versions = _software_versions()
-    rnafold_versions = sorted({str(row["rnafold_version"]) for row in candidate_rows if row.get("rnafold_version")})
+    rnafold_status = _rnafold_run_status(config, candidate_rows)
+    rnafold_versions = sorted(
+        {str(row["rnafold_version"]) for row in candidate_rows if row.get("rnafold_version")}
+    )
     if rnafold_versions:
         software_versions["rnafold"] = ", ".join(rnafold_versions)
     elif (config.get("rnafold") or {}).get("enabled", False):
-        software_versions["rnafold"] = "unavailable"
+        software_versions["rnafold"] = rnafold_status
+    overall_status = (
+        "failed"
+        if any(method["status"] in {"unavailable", "failed"} for method in manifest_methods)
+        else "completed"
+    )
     manifest = {
-        "status": "completed",
+        "status": overall_status,
         "configuration": config,
         "config_path": str(config_path),
         "config_sha256": _sha256(config_path),
@@ -613,6 +788,7 @@ def run_benchmark(config_path: Path, output_dir: Path, smoke_test: bool = False)
         "checkpoint_sha256": checkpoint_sha256,
         "seed": seed,
         "candidate_budget_per_motif": budget,
+        "rnafold_status": rnafold_status,
         "rnafold_candidate_budget_per_motif": int(
             (config.get("rnafold") or {}).get("candidate_budget_per_motif", budget)
         ),
@@ -628,6 +804,7 @@ def run_benchmark(config_path: Path, output_dir: Path, smoke_test: bool = False)
         output_dir / "run_manifest.json",
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
     )
+    return manifest
 
 
 def main() -> None:
@@ -639,7 +816,15 @@ def main() -> None:
     config_path = Path(args.config)
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     output_dir = Path(args.output_dir or config.get("output_dir", "outputs/scaffold_benchmark"))
-    run_benchmark(config_path, output_dir, smoke_test=args.smoke_test)
+    manifest = run_benchmark(config_path, output_dir, smoke_test=args.smoke_test)
+    if manifest["status"] == "failed":
+        for method in manifest["methods"]:
+            if method["status"] in {"unavailable", "failed"}:
+                print(
+                    f"{method['name']}: {method['status']}: {method['error_reason']}",
+                    file=sys.stderr,
+                )
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

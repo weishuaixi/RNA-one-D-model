@@ -92,7 +92,7 @@ def summarize_candidates(rows: list[CandidateMetric]) -> CandidateSummary:
         row.nearest_training_kmer_similarity for row in rows if row.nearest_training_kmer_similarity is not None
     ]
     peak_memory = [row.peak_cuda_memory_bytes for row in rows if row.peak_cuda_memory_bytes is not None]
-    rnafold_rows = [row for row in rows if row.rnafold_status is not None]
+    rnafold_rows = [row for row in rows if row.rnafold_status not in {None, "not_run"}]
     sequence_rows = [row for row in rows if row.sequence]
     return CandidateSummary(
         count=count,
@@ -121,7 +121,7 @@ def summarize_candidates(rows: list[CandidateMetric]) -> CandidateSummary:
         mean_rnafold_mfe_kcal_mol=_mean_available(row.rnafold_mfe_kcal_mol for row in rows),
         mean_rnafold_paired_fraction=_mean_available(row.rnafold_paired_fraction for row in rows),
         mean_rnafold_motif_paired_fraction=_mean_available(row.rnafold_motif_paired_fraction for row in rows),
-        rnafold_failure_count=sum(row.rnafold_status not in {None, "ok"} for row in rows),
+        rnafold_failure_count=sum(row.rnafold_status not in {None, "ok", "not_run"} for row in rows),
     )
 
 

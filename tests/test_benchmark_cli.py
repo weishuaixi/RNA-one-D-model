@@ -1,6 +1,7 @@
 import csv
 import hashlib
 import json
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -10,8 +11,33 @@ import pytest
 import yaml
 
 import benchmark_scaffolds
-from rna_scaffold.generate import CandidateGenerationAudit
+from rna_scaffold.generate import CandidateGenerationAudit, RnaTrainingPrior
 from rna_scaffold.validators.rnafold import RnafoldResult
+
+
+class HighestProbabilityRandom(random.Random):
+    def randint(self, start, end):
+        assert start <= 2 <= end
+        return 2
+
+    def choices(self, population, weights=None, *, cum_weights=None, k=1):
+        assert weights is not None and cum_weights is None and k == 1
+        return [population[max(range(len(weights)), key=weights.__getitem__)]]
+
+
+def test_markov2_benchmark_conditions_both_motif_junctions():
+    prior = RnaTrainingPrior.from_sequences(["AAGCGGUU"] * 20)
+
+    sequence, motif_start = benchmark_scaffolds._markov(
+        "GCGG",
+        8,
+        prior,
+        HighestProbabilityRandom(7),
+        order=2,
+    )
+
+    assert motif_start == 2
+    assert sequence == "AAGCGGUU"
 
 
 def test_benchmark_smoke_writes_reproducible_artifacts(tmp_path):
@@ -182,7 +208,7 @@ def test_learned_benchmark_method_requires_checkpoint(tmp_path):
     assert "checkpoint" in completed.stderr.lower()
 
 
-def test_missing_checkpoint_fails_before_writing_any_fallback_artifacts(tmp_path):
+def test_missing_checkpoint_writes_unavailable_terminal_artifacts_without_fallback(tmp_path):
     config = tmp_path / "benchmark.yaml"
     config.write_text(
         yaml.safe_dump(
@@ -221,7 +247,175 @@ def test_missing_checkpoint_fails_before_writing_any_fallback_artifacts(tmp_path
     assert completed.returncode != 0
     assert "checkpoint" in completed.stderr.lower()
     assert "does not exist" in completed.stderr.lower()
-    assert not output.exists()
+    assert {path.name for path in output.iterdir()} == {
+        "candidate_results.csv",
+        "motif_summary.csv",
+        "model_summary.csv",
+        "paired_bootstrap.json",
+        "run_manifest.json",
+        "benchmark_report.md",
+    }
+    with (output / "candidate_results.csv").open(encoding="utf-8", newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+    with (output / "motif_summary.csv").open(encoding="utf-8", newline="") as handle:
+        motif_summary = next(csv.DictReader(handle))
+    assert motif_summary["status"] == "unavailable"
+    assert motif_summary["count"] == "0"
+    assert "does not exist" in motif_summary["error_reason"]
+    with (output / "model_summary.csv").open(encoding="utf-8", newline="") as handle:
+        model_summary = next(csv.DictReader(handle))
+    assert model_summary["status"] == "unavailable"
+    assert model_summary["count"] == "0"
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["methods"][0]["status"] == "unavailable"
+    assert "does not exist" in manifest["methods"][0]["error_reason"]
+
+
+def test_checkpoint_load_failure_writes_failed_method_status(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "broken.ckpt"
+    checkpoint.write_bytes(b"not a checkpoint")
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "seed": 7,
+                "candidate_count": 1,
+                "bootstrap_samples": 10,
+                "motifs": [{"id": "m1", "sequence": "GCGG"}],
+                "methods": [
+                    {
+                        "name": "broken_model",
+                        "kind": "checkpoint",
+                        "checkpoint": str(checkpoint),
+                    }
+                ],
+                "rnafold": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        benchmark_scaffolds,
+        "load_scaffold_checkpoint",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("invalid v2 state")),
+        raising=False,
+    )
+    output = tmp_path / "out"
+
+    manifest = benchmark_scaffolds.run_benchmark(config, output)
+
+    assert manifest["status"] == "failed"
+    assert manifest["methods"][0]["status"] == "failed"
+    assert "invalid v2 state" in manifest["methods"][0]["error_reason"]
+    assert {path.name for path in output.iterdir()} == set(benchmark_scaffolds.ARTIFACT_NAMES)
+    with (output / "candidate_results.csv").open(encoding="utf-8", newline="") as handle:
+        assert list(csv.DictReader(handle)) == []
+    with (output / "motif_summary.csv").open(encoding="utf-8", newline="") as handle:
+        motif_summary = next(csv.DictReader(handle))
+    assert motif_summary["status"] == "failed"
+    assert motif_summary["count"] == "0"
+    assert "invalid v2 state" in motif_summary["error_reason"]
+    with (output / "model_summary.csv").open(encoding="utf-8", newline="") as handle:
+        summary = next(csv.DictReader(handle))
+    assert summary["status"] == "failed"
+    assert summary["count"] == "0"
+    assert "invalid v2 state" in summary["error_reason"]
+
+
+def test_checkpoint_method_loads_once_and_reuses_loaded_model_for_all_motifs(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "tiny.ckpt"
+    checkpoint.write_bytes(b"v2 checkpoint placeholder")
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "seed": 5,
+                "candidate_count": 1,
+                "bootstrap_samples": 10,
+                "motifs": [
+                    {"id": "m1", "sequence": "GCGG"},
+                    {"id": "m2", "sequence": "AUGC"},
+                ],
+                "methods": [
+                    {
+                        "name": "loaded_once",
+                        "kind": "checkpoint",
+                        "checkpoint": str(checkpoint),
+                    }
+                ],
+                "rnafold": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = object()
+    load_calls = []
+    generation_loaded_values = []
+
+    def fake_loader(path, device):
+        load_calls.append((path, device))
+        return loaded
+
+    class CompleteBatch(list):
+        audit = CandidateGenerationAudit(1, 1, 1, 1, {})
+
+    def fake_generate(checkpoint, motif, settings, device, loaded_checkpoint=None):
+        generation_loaded_values.append(loaded_checkpoint)
+        return CompleteBatch(
+            [SimpleNamespace(full_sequence="AA" + motif + "UU", motif_start=2, valid=True, status="ok")]
+        )
+
+    monkeypatch.setattr(benchmark_scaffolds, "load_scaffold_checkpoint", fake_loader, raising=False)
+    monkeypatch.setattr("rna_scaffold.generate.generate_candidates", fake_generate)
+    output = tmp_path / "out"
+
+    manifest = benchmark_scaffolds.run_benchmark(config, output)
+
+    assert load_calls == [(str(checkpoint), "cpu")]
+    assert generation_loaded_values == [loaded, loaded]
+    assert manifest["methods"][0]["setup_runtime_seconds"] >= 0
+    assert manifest["methods"][0]["generation_runtime_seconds"] >= 0
+
+
+def test_nonempty_output_directory_fails_without_deleting_unknown_files(tmp_path):
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "seed": 42,
+                "candidate_count": 1,
+                "bootstrap_samples": 10,
+                "motifs": [{"id": "m1", "sequence": "GCGG"}],
+                "methods": [{"name": "uniform", "kind": "uniform"}],
+                "rnafold": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+    output.mkdir()
+    stale = output / "stale-v1-artifact.json"
+    stale.write_text("do not delete\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "benchmark_scaffolds.py",
+            "--config",
+            str(config),
+            "--output-dir",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "output directory must be empty" in completed.stderr.lower()
+    assert stale.read_text(encoding="utf-8") == "do not delete\n"
+    assert [path.name for path in output.iterdir()] == ["stale-v1-artifact.json"]
 
 
 def test_checkpoint_shortfall_is_explicit_and_retains_rejection_reasons(monkeypatch, tmp_path):
@@ -258,6 +452,11 @@ def test_checkpoint_shortfall_is_explicit_and_retains_rejection_reasons(monkeypa
             rejected={"duplicate": 3},
         )
 
+    monkeypatch.setattr(
+        benchmark_scaffolds,
+        "load_scaffold_checkpoint",
+        lambda *args, **kwargs: object(),
+    )
     monkeypatch.setattr(
         "rna_scaffold.generate.generate_candidates",
         lambda *args, **kwargs: ShortBatch(
@@ -330,7 +529,71 @@ def test_optional_rnafold_enrichment_records_status_and_proxy_metrics(monkeypatc
     assert candidate["rnafold_version"] == "RNAfold 2.7"
     assert float(candidate["rnafold_runtime_seconds"]) == pytest.approx(0.01)
     manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["rnafold_status"] == "ok"
     assert manifest["software_versions"]["rnafold"] == "RNAfold 2.7"
+
+
+def test_zero_rnafold_budget_is_not_run_in_candidates_and_manifest(monkeypatch, tmp_path):
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "seed": 3,
+                "candidate_count": 1,
+                "bootstrap_samples": 10,
+                "motifs": [{"id": "m1", "sequence": "GCGG"}],
+                "methods": [{"name": "uniform", "kind": "uniform"}],
+                "rnafold": {"enabled": True, "candidate_budget_per_motif": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        benchmark_scaffolds,
+        "run_rnafold",
+        lambda *args, **kwargs: pytest.fail("RNAfold must not run with zero candidate budget"),
+    )
+    output = tmp_path / "out"
+
+    benchmark_scaffolds.run_benchmark(config, output)
+
+    with (output / "candidate_results.csv").open(encoding="utf-8", newline="") as handle:
+        candidate = next(csv.DictReader(handle))
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert candidate["rnafold_status"] == "not_run"
+    assert manifest["rnafold_status"] == "not_run"
+    assert manifest["software_versions"]["rnafold"] == "not_run"
+
+
+def test_missing_rnafold_executable_is_unavailable_not_not_run(tmp_path):
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {
+                "seed": 3,
+                "candidate_count": 1,
+                "bootstrap_samples": 10,
+                "motifs": [{"id": "m1", "sequence": "GCGG"}],
+                "methods": [{"name": "uniform", "kind": "uniform"}],
+                "rnafold": {
+                    "enabled": True,
+                    "candidate_budget_per_motif": 1,
+                    "executable": "definitely-not-an-rnafold-executable-v2",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "out"
+
+    benchmark_scaffolds.run_benchmark(config, output)
+
+    with (output / "candidate_results.csv").open(encoding="utf-8", newline="") as handle:
+        candidate = next(csv.DictReader(handle))
+    manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+    assert candidate["rnafold_status"] == "unavailable"
+    assert manifest["rnafold_status"] == "unavailable"
+    assert manifest["software_versions"]["rnafold"] == "unavailable"
 
 
 def test_atomic_writer_preserves_existing_artifact_when_replace_fails(monkeypatch, tmp_path):

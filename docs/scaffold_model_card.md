@@ -24,7 +24,7 @@ Training uses AdamW, label-smoothed scaffold cross-entropy, length and position 
 
 ## Evaluation
 
-Required reports include canonical validity, exact motif preservation, uniqueness, diversity, nearest-training similarity, length and position errors, normalized likelihood, GC and complexity distributions, runtime, failures, and paired bootstrap intervals. RNAfold fields are reported only when the executable succeeds. MFE is never used as the sole ranking criterion.
+Required reports include canonical validity, exact motif preservation, uniqueness, diversity, nearest-training similarity, length and position errors, normalized likelihood, GC and complexity distributions, runtime, failures, and paired bootstrap intervals. Candidate RNAfold status is explicit: `not_run` means that structural validation was not attempted (including a zero or exhausted structure budget), while `unavailable` means that an attempted validation could not find the executable. Successful, timed-out, failed, and malformed-output attempts retain `ok`, `timeout`, `failed`, and `parse_error` respectively. The run manifest aggregates this state separately from the observed RNAfold version. MFE is never used as the sole ranking criterion.
 
 ## Limitations
 
@@ -36,4 +36,4 @@ Required reports include canonical validity, exact motif preservation, uniquenes
 
 ## Reproducibility
 
-Every generated row records seed, checkpoint SHA-256, sampling settings, motif coordinates, raw metrics, and status. Benchmark methods use identical motif, candidate, seed, and external-compute budgets. Missing predictions remain missing and are never replaced by outputs from another method.
+Every generated row records seed, checkpoint SHA-256, sampling settings, motif coordinates, raw metrics, and status. Benchmark methods use identical motif, candidate, seed, and external-compute budgets. A missing checkpoint is `unavailable` and a checkpoint loading or inference exception is `failed`; both produce zero candidate rows with the reason preserved in motif, model, and manifest records, never a fallback prediction. A successful run directory contains exactly the six declared benchmark artifacts and therefore must be new or empty. Missing predictions remain missing and are never replaced by outputs from another method.
