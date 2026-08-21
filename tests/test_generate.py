@@ -5,8 +5,8 @@ from rna_scaffold.decoding import DecodedScaffold
 from rna_scaffold.generate import (
     CandidateDiversityDecision,
     CandidateGenerationAudit,
-    GenerationSettings,
     GeneratedCandidates,
+    GenerationSettings,
     RnaTrainingPrior,
     assess_candidate_diversity,
     build_auto_masked_scaffold_prompts,
@@ -221,7 +221,7 @@ def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths
     def fake_iterative_denoise(model, tokenizer, motif, total_length, motif_start, settings, generator, device):
         decoded_geometry.append((total_length, motif_start))
         return DecodedScaffold(
-            sequence="AA" + motif + "AAA",
+            sequence="AA" + motif + "AAAA",
             normalized_log_probability=-0.5,
             masked_counts=(0,),
         )
@@ -254,6 +254,7 @@ def test_generate_candidates_derives_canvas_geometry_from_selected_flank_lengths
     assert decoded_geometry == [(10, 2)]
     assert candidates[0].motif_start == 2
     assert candidates[0].total_length == 10
+    assert len(candidates[0].full_sequence) == candidates[0].total_length
 
 
 def test_markov_baseline_can_follow_training_length_distribution(tmp_path):

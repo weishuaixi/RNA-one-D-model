@@ -63,11 +63,8 @@ def load_scaffold_checkpoint(
             f"checkpoint hyper_parameters are incompatible: {error}"
         ) from error
 
-    migrated_state = dict(state_dict)
-    migrated_state.pop("model.confidence_head.weight", None)
-    migrated_state.pop("model.confidence_head.bias", None)
     try:
-        model.load_state_dict(migrated_state, strict=True)
+        model.load_state_dict(state_dict, strict=True)
     except RuntimeError as error:
         raise CheckpointCompatibilityError(f"checkpoint state_dict is incompatible: {error}") from error
     model.to(device)

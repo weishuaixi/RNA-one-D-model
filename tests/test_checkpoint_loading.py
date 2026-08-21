@@ -4,7 +4,7 @@ import pytest
 import torch
 from torch import nn
 
-import rna_scaffold.pretrained as pretrained
+from rna_scaffold import pretrained
 from rna_scaffold.checkpoints import CheckpointCompatibilityError, load_scaffold_checkpoint
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
 from rna_scaffold.pretrained import LoRALinear
@@ -161,7 +161,23 @@ def test_load_scaffold_checkpoint_rejects_missing_hyperparameters(tmp_path):
         load_scaffold_checkpoint(checkpoint)
 
 
-@pytest.mark.parametrize("version", [None, 1], ids=["missing", "v1"])
+def test_load_scaffold_checkpoint_rejects_removed_state_even_when_marked_v2(tmp_path):
+    checkpoint = tmp_path / "legacy-state.ckpt"
+    _write_tiny_checkpoint(checkpoint)
+    payload = torch.load(checkpoint, weights_only=False)
+    payload["state_dict"]["model.confidence_head.weight"] = torch.zeros(1, 16)
+    payload["state_dict"]["model.confidence_head.bias"] = torch.zeros(1)
+    torch.save(payload, checkpoint)
+
+    with pytest.raises(CheckpointCompatibilityError, match="state_dict is incompatible"):
+        load_scaffold_checkpoint(checkpoint)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [None, 1, True, 2.0, "2"],
+    ids=["missing", "v1", "boolean", "float", "string"],
+)
 def test_load_scaffold_checkpoint_rejects_non_v2_architecture(tmp_path, version):
     checkpoint = tmp_path / f"invalid-{version}.ckpt"
     _write_checkpoint_with_version(checkpoint, version)

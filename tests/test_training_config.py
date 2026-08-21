@@ -3,7 +3,7 @@ from pathlib import Path
 import yaml
 from torch import nn
 
-import rna_scaffold.lightning_module as lightning_module
+from rna_scaffold import lightning_module
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
 
 
@@ -43,6 +43,9 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
     assert config["model"]["num_layers"] >= 12
     assert config["model"]["activation_checkpointing"] is True
     assert config["model"]["pretrained"]["kind"] == "rna_fm"
+    assert config["model"]["pretrained"]["checkpoint"] == (
+        ".cache/torch/hub/checkpoints/RNA-FM_pretrained.pth"
+    )
     assert config["model"]["pretrained"]["mode"] == "lora"
     assert config["model"]["pretrained"]["lora_rank"] == 8
     assert config["model"]["pretrained"]["lora_alpha"] == 16.0

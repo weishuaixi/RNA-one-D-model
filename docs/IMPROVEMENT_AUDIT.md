@@ -1,47 +1,57 @@
-# RNA-one-D-model improvement audit
+# RNA Scaffold Generator V2 Improvement Audit
 
-This matrix maps every requested improvement to its implementation and direct
-verification. “Verified” means the current code path has a focused automated
-test; it does not claim that the one-epoch local smoke model has useful folding
-accuracy.
+This matrix maps the V2 design requirements to shipped behavior and direct
+verification. “Verified” means the code path has automated evidence; it
+does not mean the CPU tiny model has useful biological performance.
 
-| Requested improvement | Current implementation | Direct evidence |
+| V2 requirement | Shipped behavior | Direct evidence |
 |---|---|---|
-| Random rotation augmentation before training | Batched random proper rotation plus translation, enabled by all 3D configs | `test_random_rigid_augmentation_preserves_pairwise_distances` |
-| Kabsch alignment before coordinate loss | Aligned coordinate loss uses masked Kabsch; raw-frame MSE is disabled by default | `test_kabsch_and_fape_are_invariant_to_global_rigid_transform` |
-| True FAPE/local-frame primary loss | All-atom residue-frame FAPE is mandatory and has positive config weight | `test_all_atom_fape_detects_non_representative_atom_error`, config validation |
-| SE(3)/E(3)-equivariant structure path | IPA uses residue frames; internal-coordinate refiners use invariant distances; rebuilding transforms all atoms equivariantly | `test_invariant_point_attention_is_invariant_to_global_rigid_transform`, `test_full_all_atom_structure_is_equivariant_to_initial_global_rotation` |
-| Residue rigid frame + backbone torsions + pucker + base orientation | Seven torsions, sugar pseudorotation, SO(3) base orientation and CCD templates construct all heavy atoms | internal-coordinate round-trip, sugar closure and glycosidic geometry tests |
-| Triangle multiplicative incoming/outgoing | Separate directed incoming and outgoing updates with third-edge masks | four directed/masked triangle multiplication tests |
-| Triangle attention starting/ending node | Separate starting/ending modules with third-edge pair bias | four triangle-attention value/gradient tests |
-| Pair transition | Masked pair MLP transition after triangle stack | `test_pair_transition_masks_padding_and_updates_valid_pairs` |
-| Sequence attention with pair bias | Pair tensor supplies per-head attention logits | `test_sequence_attention_uses_pair_bias_and_masks_padding_edges` |
-| Outer-product sequence-to-pair update | True cross-channel outer product, chunked without changing gradients | two outer-product tests |
-| Inject 2D pair information into sequence | Pair-biased attention in every trunk block and masked pair-to-sequence recycle update | pair-bias and recycling preservation tests |
-| Attention pooling instead of mean | Learned masked attention pooling over full pair rows | `test_pair_attention_pooling_ignores_padding_and_zeroes_empty_rows` |
-| Structure module accesses full pair tensor | Pair pooling, pair-conditioned attention and IPA consume the complete directed tensor | `test_structure_module_coordinates_receive_full_pair_tensor_gradients` |
-| Separate distance/direction/contact channels | Directed pair representation; omega/theta/phi and contact heads; only distogram logits are symmetrized | `test_directed_pair_channels_and_symmetric_distance_head_are_separate`, orientation/contact gradient test |
-| Pair initialization and all updates use pair mask | Initialization, OPM, triangles, transition, recycling, pooling and structure attention all apply masks | padding invariance plus module-specific mask tests |
-| Padding must not affect shorter sequence | No unmasked `pair.mean`; empty rows return zero; structure output is length invariant | `test_padding_does_not_change_valid_residue_outputs_or_pair_features` |
-| Save initial seq/pair and recycle initial + previous features | Each recycle starts from initial embeddings and adds normalized previous seq, full pair and C1′ distance features | recycling information and padding tests |
-| Configurable whole-recycle stop gradient | Every nonfinal recycle is jointly detached when configured | two graph-mode stop-gradient tests |
-| Explicit C1′/C4′ residue representatives | C1′ is the reported/scored residue coordinate; C4′/C1′/glycosidic N define frames | representative-coordinate and sequence-aware-frame tests |
-| Random recycle count during training | Uniformly samples 1..maximum only in training; evaluation uses requested/all maximum counts | `test_training_randomly_samples_recycle_counts_but_evaluation_uses_maximum` |
-| Test stability at different recycle counts | Evaluator runs every supported count and reports rigid-invariant drift with a worst-target gate | recycle parser/stability/evaluation tests |
-| Symmetric distance but asymmetric orientation/relative channels | Directed pair stays asymmetric; only final distance logits are averaged with transpose | directed-pair symmetry separation test |
-| Add orientation heads | Pair omega/theta/phi heads plus final sugar-to-base SO(3) orientation supervision and metric | pair orientation tests, base orientation loss/metric tests |
-| Periodic α,β,γ,δ,ε,ζ,χ targets | Direct normalized sin/cos targets with `1-cos(Δθ)`; base-specific N9/N1 χ | periodic, base-specific χ and cross-residue ε/ζ tests |
-| O3′(i)-P(i+1), cross-residue angles and torsions | Exact 1.60 Å construction/loss, both adjacent bond angles, and target-derived α/ε/ζ | phosphodiester bond/angle and cross-residue torsion tests |
-| Base planarity and sugar closure | Explicit differentiable geometry losses and target-independent evaluator metrics | planarity, sugar closure and release-gate tests |
-| Exclude covalently connected atoms from clash | Base-specific within-residue bond graph and adjacent O3′-P exclusion | covalent-exclusion and nonbonded-clash tests |
-| Leakage-safe independent validation | Exact length-bounded weighted-Jaccard clustering, exhaustive train×val and train×holdout audits | split v3/holdout v2 tests and real 4,127-sequence audit |
-| Reproducible training and release artifacts | Checkpoint v5 stores RNG/DataLoader states, semantic fingerprint and exact split/holdout manifest hashes | uninterrupted-vs-resume and tamper-rejection tests |
-| Independent structural release metrics | C1′ accuracy, confidence calibration, physical geometry, torsion, pucker, base orientation, recycle stability, coverage and per-target pass fraction | evaluator and release-pipeline tests |
+| Canonical data contract | Strict A/U/C/G normalization, unique IDs/sequences, complete MMseqs2 assignments, expected 1,513/133/169 split counts | `tests/test_records_and_splits.py`, `tests/test_training_config.py` |
+| Cluster-disjoint splitting | Complete connected components remain in one partition; leakage and incomplete assignments fail | `tests/test_records_and_splits.py` |
+| Long-RNA retention | Source sequences are retained and dynamically cropped to a reproducible 512-nt epoch window | `test_long_rna_is_retained_and_cropped_reproducibly_per_epoch` |
+| Bilateral flank targets | Targets are exactly motif start and target length minus motif end | `test_denoising_dataset_derives_bilateral_targets_without_v1_target_keys` |
+| Geometry-free placement input | Placement receives only compact immutable motif tokens | `test_compact_fixed_motifs_removes_flank_length_and_position_leakage` |
+| Joint legal flank selection | Pair scoring enforces both flank minima and requested/model/total limits | `tests/test_denoising_model.py`, `tests/test_iterative_decoding.py` |
+| Prediction-only base loss | Fixed motif and padding positions are excluded from base loss and accuracy | `tests/test_model.py`, `tests/test_denoising_model.py` |
+| RNA-FM none/frozen/LoRA modes | Explicit mode validation; no legacy boolean switch | `tests/test_pretrained_adapter.py`, `tests/test_training_config.py` |
+| RNA-FM LoRA boundary | Final-layer q/k/v/out projections receive input-dropout LoRA; base parameters stay frozen | `tests/test_pretrained_adapter.py` |
+| LoRA execution correctness | RNA-FM functional attention switches to its module path and all adapters receive finite gradients | `test_rna_fm_functional_attention_switches_to_adapter_aware_module_path` |
+| Pretrained provenance | Local RNA-FM hash, adapter targets/settings, and parameter counts enter checkpoint metadata | `test_lora_checkpoint_metadata_records_adapter_contract` |
+| Strict V2 checkpoint contract | Missing, older, boolean, float, and string versions are rejected; exact V2 round-trip is strict | `tests/test_checkpoint_loading.py` |
+| Confidence remasking | All scaffold positions are re-predicted; lowest raw-confidence positions are re-masked monotonically | `tests/test_iterative_decoding.py` |
+| Motif immutability | Motif is restored at every step and remains exact in final candidates | `tests/test_iterative_decoding.py`, `tests/test_generate.py` |
+| Fresh final likelihood | Final resolved tokens are re-forwarded before normalized scoring | `tests/test_iterative_decoding.py` |
+| Diversity controls | Duplicate/edit/k-mer/homopolymer/GC policies and bounded attempts report each rejection reason | `tests/test_generate.py` |
+| No quota fabrication | Diversity shortfall remains a shortfall; existing sequences are never copied | `test_generation_shortfall_is_audited_after_bounded_duplicate_attempts` |
+| Meaningful baselines | Uniform, first-order Markov, and motif-boundary-aware second-order Markov are distinct methods | `tests/test_scaffold_evaluation.py`, `tests/test_benchmark_cli.py` |
+| Explicit checkpoint terminal states | Missing/failed checkpoint methods retain unavailable/failed state without heuristic fallback | `tests/test_benchmark_cli.py` |
+| Paired uncertainty | Motif-paired bootstrap is reproducible and uses only common motif IDs | `tests/test_scaffold_evaluation.py` |
+| RNAfold truthfulness | Optional adapter distinguishes not-run, unavailable, timeout, failure, parse error, and success | `tests/test_rnafold_validator.py`, `tests/test_benchmark_cli.py` |
+| Atomic six-artifact benchmark | New/empty output directory, exact artifact set, manifest hashes, and terminal status | `tests/test_benchmark_cli.py` |
+| Runtime release boundary | Runtime Python/YAML are scanned for removed placement/loss interfaces, old fallback wording, and removed training entry points | `tests/test_package_boundary.py`, `tests/test_release_audit.py` |
+| CPU end-to-end release gate | One optimizer step writes a V2 checkpoint, public loader reconstructs it, at least two unique motif-preserved candidates are sequence-evaluated without RNAfold | `test_cpu_tiny_v2_workflow_trains_loads_generates_and_evaluates` |
+
+## Reproducibility artifacts
+
+The authoritative setup writes:
+
+- `outputs/server_setup/canonical_data_audit.json`: canonical input
+  SHA-256 values, split assignments, record/cluster counts, thresholds, and
+  data audit;
+- `outputs/server_setup/rna_fm_sha256.txt`: the exact cached RNA-FM weight
+  hash;
+- `outputs/server_setup/scaffold_release_audit.json`: release checks,
+  environment, repository state, and configuration hashes.
+
+Every formal benchmark manifest additionally records command arguments,
+seeds, software versions, configuration/data/checkpoint hashes, method
+states, and hashes of the six output artifacts.
 
 ## Remaining external evidence
 
-The implementation and local execution path are verified. Final model-quality
-completion still requires a new full-data A800 training run producing checkpoint
-format v5, followed by both official multi-reference C1′ validation and strict
-held-out all-atom evaluator v6 gates. The one-epoch, two-record Windows smoke is
-only runtime/provenance evidence and is not folding-quality evidence.
+Local and CPU-container verification establishes interface, provenance, and
+runtime correctness. Final scientific completion still requires matched
+full-data A800 runs for no RNA-FM, frozen RNA-FM, and LoRA configurations,
+followed by the formal equal-budget benchmark and appropriate experimental
+validation. No smoke result is a folding-quality or biological-function
+claim.
