@@ -1,8 +1,11 @@
+import copy
 from pathlib import Path
 
+import pytest
 import yaml
 from torch import nn
 
+import train
 from rna_scaffold import lightning_module
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
 
@@ -26,6 +29,7 @@ def test_a800_config_is_accuracy_oriented_and_memory_safe():
         "validation": 133,
         "test": 169,
     }
+    assert config["data"]["expected_cluster_count"] == 1185
     assert config["data"]["cluster_thresholds"] == {
         "min_sequence_identity": 0.8,
         "min_bidirectional_coverage": 0.8,
@@ -76,3 +80,21 @@ def test_a800_model_config_constructs_lightning_boundary(monkeypatch):
 
     assert module.left_length_loss_weight == 0.25
     assert module.right_length_loss_weight == 0.25
+
+
+def test_authoritative_training_config_passes_current_entry_schema():
+    config_path = Path(__file__).parents[1] / "configs" / "train_scaffold_a800.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert hasattr(train, "validate_training_config")
+
+    train.validate_training_config(config)
+
+
+def test_training_config_schema_rejects_removed_model_constructor_keys():
+    config_path = Path(__file__).parents[1] / "configs" / "train_scaffold_a800.yaml"
+    config = copy.deepcopy(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+    config["model"]["num_encoder_layers"] = 8
+    assert hasattr(train, "validate_training_config")
+
+    with pytest.raises(TypeError, match="num_encoder_layers"):
+        train.validate_training_config(config)

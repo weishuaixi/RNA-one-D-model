@@ -38,6 +38,15 @@ def test_public_command_entry_points_are_declared():
     assert 'rna-benchmark-scaffolds = "benchmark_scaffolds:main"' in pyproject
 
 
+def test_only_supported_v2_runtime_configs_are_shipped():
+    root = Path(__file__).resolve().parents[1]
+
+    assert sorted(path.name for path in (root / "configs").glob("*.yaml")) == [
+        "benchmark_scaffolds.yaml",
+        "train_scaffold_a800.yaml",
+    ]
+
+
 def test_runtime_sources_and_configuration_do_not_reference_v1_boundaries():
     root = Path(__file__).resolve().parents[1]
     violations: dict[str, list[str]] = {}

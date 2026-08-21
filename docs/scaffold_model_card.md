@@ -48,9 +48,11 @@ coverage. The deterministic cluster-disjoint split contains 1,513 training,
 
 Setup rejects invalid bases, duplicate IDs, duplicate normalized sequences,
 missing or extra cluster assignments, declared cluster-size mismatches, and
-cross-partition cluster leakage. It records source SHA-256 values, split
-counts, cluster counts, thresholds, seed, and assignments. Long source RNAs
-are retained and dynamically cropped to the 512-nucleotide model window.
+cross-partition cluster leakage. The formal training data module also rejects
+an eligible manifest whose cluster count differs from the configured 1,185.
+Setup records source SHA-256 values, split counts, cluster counts, thresholds,
+seed, and assignments. Long source RNAs are retained and dynamically cropped
+to the 512-nucleotide model window.
 
 ## Optimization and checkpoint compatibility
 
@@ -62,7 +64,9 @@ activation checkpointing, BF16 mixed precision, and best/last checkpoints.
 Every accepted checkpoint has integer `architecture_version: 2`.
 Unversioned checkpoints, non-integer versions, and versions other than 2
 are rejected with an instruction to retrain. V2 does not silently convert
-or heuristically replace an incompatible checkpoint.
+or heuristically replace an incompatible checkpoint. Both CLI/config-driven
+resume paths validate this contract before `Trainer.fit`, and the Lightning
+checkpoint hook enforces the same contract during restoration.
 
 Checkpoint metadata records RNA-FM mode, local RNA-FM checkpoint SHA-256,
 adapter targets and hyperparameters, and total/trainable parameter counts.
@@ -120,7 +124,8 @@ writes exactly:
 ## Release status
 
 The CPU release gate proves training-path execution, V2 checkpoint
-round-trip, generation of at least two unique motif-preserved candidates,
-and sequence-only evaluation. It is runtime evidence, not model-quality
-evidence. Final quality claims require full A800 training and the formal
-paired benchmark with all declared V2 checkpoints.
+round-trip, resume-path and Lightning-hook rejection of V1, generation of at
+least two unique motif-preserved candidates, and sequence-only evaluation. It
+is runtime evidence, not model-quality evidence. Final quality claims require
+full A800 training and the formal paired benchmark with all declared V2
+checkpoints.

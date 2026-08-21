@@ -50,6 +50,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         val_fraction: float = 0.05,
         test_fraction: float = 0.1,
         expected_partition_counts: dict[str, int] | None = None,
+        expected_cluster_count: int | None = None,
         cluster_thresholds: dict[str, float] | None = None,
         seed: int = 42,
     ) -> None:
@@ -82,6 +83,7 @@ class RnaScaffoldDataModule(L.LightningDataModule):
         self.val_fraction = val_fraction
         self.test_fraction = test_fraction
         self.expected_partition_counts = expected_partition_counts
+        self.expected_cluster_count = expected_cluster_count
         self.cluster_thresholds = cluster_thresholds
         self.seed = seed
 
@@ -114,6 +116,15 @@ class RnaScaffoldDataModule(L.LightningDataModule):
                 clustering_thresholds=self.cluster_thresholds,
                 expected_partition_counts=self.expected_partition_counts,
             )
+            actual_cluster_count = self.split_manifest.cluster_counts.get("total")
+            if (
+                self.expected_cluster_count is not None
+                and actual_cluster_count != self.expected_cluster_count
+            ):
+                raise ValueError(
+                    "eligible cluster count does not match expected: "
+                    f"actual={actual_cluster_count}, expected={self.expected_cluster_count}"
+                )
             self.train_dataset = datasets["train"]
             self.val_dataset = datasets["validation"]
             self.test_dataset = datasets["test"]

@@ -6,7 +6,7 @@ does not mean the CPU tiny model has useful biological performance.
 
 | V2 requirement | Shipped behavior | Direct evidence |
 |---|---|---|
-| Canonical data contract | Strict A/U/C/G normalization, unique IDs/sequences, complete MMseqs2 assignments, expected 1,513/133/169 split counts | `tests/test_records_and_splits.py`, `tests/test_training_config.py` |
+| Canonical data contract | Strict A/U/C/G normalization, unique IDs/sequences, complete MMseqs2 assignments, expected 1,185 eligible clusters and 1,513/133/169 split counts | `tests/test_records_and_splits.py`, `tests/test_training_config.py` |
 | Cluster-disjoint splitting | Complete connected components remain in one partition; leakage and incomplete assignments fail | `tests/test_records_and_splits.py` |
 | Long-RNA retention | Source sequences are retained and dynamically cropped to a reproducible 512-nt epoch window | `test_long_rna_is_retained_and_cropped_reproducibly_per_epoch` |
 | Bilateral flank targets | Targets are exactly motif start and target length minus motif end | `test_denoising_dataset_derives_bilateral_targets_without_v1_target_keys` |
@@ -17,7 +17,7 @@ does not mean the CPU tiny model has useful biological performance.
 | RNA-FM LoRA boundary | Final-layer q/k/v/out projections receive input-dropout LoRA; base parameters stay frozen | `tests/test_pretrained_adapter.py` |
 | LoRA execution correctness | RNA-FM functional attention switches to its module path and all adapters receive finite gradients | `test_rna_fm_functional_attention_switches_to_adapter_aware_module_path` |
 | Pretrained provenance | Local RNA-FM hash, adapter targets/settings, and parameter counts enter checkpoint metadata | `test_lora_checkpoint_metadata_records_adapter_contract` |
-| Strict V2 checkpoint contract | Missing, older, boolean, float, and string versions are rejected; exact V2 round-trip is strict | `tests/test_checkpoint_loading.py` |
+| Strict V2 checkpoint contract | Missing, older, boolean, float, and string versions are rejected by inference, CLI/config resume before `Trainer.fit`, and the Lightning restore hook; exact V2 round-trip is strict | `tests/test_checkpoint_loading.py`, `tests/test_training_resume.py` |
 | Confidence remasking | All scaffold positions are re-predicted; lowest raw-confidence positions are re-masked monotonically | `tests/test_iterative_decoding.py` |
 | Motif immutability | Motif is restored at every step and remains exact in final candidates | `tests/test_iterative_decoding.py`, `tests/test_generate.py` |
 | Fresh final likelihood | Final resolved tokens are re-forwarded before normalized scoring | `tests/test_iterative_decoding.py` |
@@ -29,7 +29,8 @@ does not mean the CPU tiny model has useful biological performance.
 | RNAfold truthfulness | Optional adapter distinguishes not-run, unavailable, timeout, failure, parse error, and success | `tests/test_rnafold_validator.py`, `tests/test_benchmark_cli.py` |
 | Atomic six-artifact benchmark | New/empty output directory, exact artifact set, manifest hashes, and terminal status | `tests/test_benchmark_cli.py` |
 | Runtime release boundary | Runtime Python/YAML are scanned for removed placement/loss interfaces, old fallback wording, and removed training entry points | `tests/test_package_boundary.py`, `tests/test_release_audit.py` |
-| CPU end-to-end release gate | One optimizer step writes a V2 checkpoint, public loader reconstructs it, at least two unique motif-preserved candidates are sequence-evaluated without RNAfold | `test_cpu_tiny_v2_workflow_trains_loads_generates_and_evaluates` |
+| V2 configuration boundary | The release audit constructs the only shipped training schema and normalizes the only benchmark schema; unsupported legacy configs are absent | `tests/test_training_config.py`, `tests/test_release_audit.py` |
+| CPU end-to-end release gate | One optimizer step writes a V2 checkpoint, public resume and load gates validate it, V1 resume paths are rejected, and at least two unique motif-preserved candidates are sequence-evaluated without RNAfold | `test_cpu_tiny_v2_workflow_trains_loads_generates_and_evaluates` |
 
 ## Reproducibility artifacts
 

@@ -16,6 +16,7 @@ data:
     train: 1513
     validation: 133
     test: 169
+  expected_cluster_count: 1185
   task: motif_denoising
   min_motif_length: 4
   max_motif_length:

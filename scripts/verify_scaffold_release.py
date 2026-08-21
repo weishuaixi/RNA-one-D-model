@@ -13,6 +13,8 @@ import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 
 _REMOVED_RUNTIME_TERMS = (
@@ -82,11 +84,68 @@ def _audit_v2_runtime_boundary(root: Path = ROOT) -> dict:
     }
 
 
+def _audit_v2_configuration_schemas(root: Path = ROOT) -> dict:
+    expected = {
+        "benchmark_scaffolds.yaml",
+        "train_scaffold_a800.yaml",
+    }
+    config_root = root / "configs"
+    actual_paths = sorted(
+        {
+            *config_root.glob("*.yaml"),
+            *config_root.glob("*.yml"),
+        }
+    )
+    actual_names = {path.name for path in actual_paths}
+    violations = []
+    missing = sorted(expected - actual_names)
+    unexpected = sorted(actual_names - expected)
+    if missing:
+        violations.append({"path": "configs", "error": f"missing supported configs: {missing}"})
+    if unexpected:
+        violations.append({"path": "configs", "error": f"unsupported runtime configs: {unexpected}"})
+
+    validated = []
+    for path in actual_paths:
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        if path.name not in expected:
+            continue
+        try:
+            config = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if path.name == "train_scaffold_a800.yaml":
+                from train import validate_training_config
+
+                validate_training_config(config)
+            else:
+                from benchmark_scaffolds import _normalise_method_specs, _normalise_motifs
+
+                _normalise_method_specs(config, smoke_test=False)
+                _normalise_motifs(config)
+                if int(config.get("candidate_count", 0)) <= 0:
+                    raise ValueError("benchmark candidate_count must be positive")
+                if int(config.get("bootstrap_samples", 0)) <= 0:
+                    raise ValueError("benchmark bootstrap_samples must be positive")
+        except (ImportError, KeyError, TypeError, ValueError, yaml.YAMLError) as error:
+            violations.append({"path": relative, "error": f"{type(error).__name__}: {error}"})
+        else:
+            validated.append(relative)
+    return {
+        "name": "V2 configuration schemas",
+        "status": "failed" if violations else "passed",
+        "validated": validated,
+        "violations": violations,
+    }
+
+
 def run_cpu_tiny_v2_workflow(work_dir: str | Path) -> dict:
     import torch
     from torch.utils.data import DataLoader
 
-    from rna_scaffold.checkpoints import load_scaffold_checkpoint
+    from rna_scaffold.checkpoints import (
+        CheckpointCompatibilityError,
+        load_scaffold_checkpoint,
+        validate_scaffold_checkpoint_version,
+    )
     from rna_scaffold.data import RnaMotifDenoisingDataset
     from rna_scaffold.evaluation import CandidateMetric, summarize_candidates
     from rna_scaffold.generate import GenerationSettings, generate_candidates
@@ -151,6 +210,25 @@ def run_cpu_tiny_v2_workflow(work_dir: str | Path) -> dict:
     }
     module.on_save_checkpoint(checkpoint)
     torch.save(checkpoint, checkpoint_path)
+    validate_scaffold_checkpoint_version(checkpoint_path)
+
+    incompatible_checkpoint = dict(checkpoint)
+    incompatible_checkpoint["architecture_version"] = 1
+    incompatible_checkpoint_path = work_path / "tiny-v1-resume.ckpt"
+    torch.save(incompatible_checkpoint, incompatible_checkpoint_path)
+    try:
+        validate_scaffold_checkpoint_version(incompatible_checkpoint_path)
+    except CheckpointCompatibilityError:
+        resume_path_v1_rejected = True
+    else:
+        resume_path_v1_rejected = False
+    try:
+        module.on_load_checkpoint(incompatible_checkpoint)
+    except CheckpointCompatibilityError:
+        resume_hook_v1_rejected = True
+    else:
+        resume_hook_v1_rejected = False
+
     loaded = load_scaffold_checkpoint(checkpoint_path, device="cpu")
 
     motif = "GCGG"
@@ -188,6 +266,9 @@ def run_cpu_tiny_v2_workflow(work_dir: str | Path) -> dict:
         "optimizer_steps": 1,
         "training_loss_is_finite": bool(torch.isfinite(loss.detach()).item()),
         "checkpoint_loaded": loaded.max_length == 12,
+        "resume_checkpoint_validated": True,
+        "resume_path_v1_rejected": resume_path_v1_rejected,
+        "resume_hook_v1_rejected": resume_hook_v1_rejected,
         "checkpoint_sha256": loaded.checkpoint_sha256,
         "candidate_count": summary.count,
         "motif_preservation_rate": summary.motif_preservation_rate,
@@ -211,6 +292,9 @@ def _run_cpu_tiny_v2_check() -> dict:
         and evidence["optimizer_steps"] == 1
         and evidence["training_loss_is_finite"]
         and evidence["checkpoint_loaded"]
+        and evidence["resume_checkpoint_validated"]
+        and evidence["resume_path_v1_rejected"]
+        and evidence["resume_hook_v1_rejected"]
         and evidence["candidate_count"] >= 2
         and evidence["motif_preservation_rate"] == 1.0
         and evidence["unique_rate"] == 1.0
@@ -231,6 +315,7 @@ def main() -> None:
 
     checks = []
     checks.append(_audit_v2_runtime_boundary())
+    checks.append(_audit_v2_configuration_schemas())
     checks.append(_run_cpu_tiny_v2_check())
     if args.skip_tests:
         checks.append(

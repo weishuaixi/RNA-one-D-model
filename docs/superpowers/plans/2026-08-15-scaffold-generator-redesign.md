@@ -182,7 +182,7 @@ git commit -m "feat: add leakage-safe variable motif datasets"
 - Create: `rna_scaffold/model.py`
 - Modify: `rna_scaffold/lightning_module.py`
 - Modify: `rna_scaffold/tokenizer.py`
-- Modify: `configs/train_stanford_1d.yaml`
+- Modify: `configs/train_scaffold_a800.yaml`
 - Test: `tests/test_denoising_model.py`
 - Test: `tests/test_model.py`
 
@@ -234,7 +234,7 @@ Expected: PASS; the tiny synthetic batch loss decreases after 50 optimizer steps
 - [ ] **Step 6: Commit the model**
 
 ```bash
-git add rna_scaffold/model.py rna_scaffold/lightning_module.py rna_scaffold/tokenizer.py configs/train_stanford_1d.yaml tests/test_denoising_model.py tests/test_model.py
+git add rna_scaffold/model.py rna_scaffold/lightning_module.py rna_scaffold/tokenizer.py configs/train_scaffold_a800.yaml tests/test_denoising_model.py tests/test_model.py
 git commit -m "feat: add motif-protected denoising scaffold model"
 ```
 
@@ -299,7 +299,7 @@ git commit -m "feat: generate ranked scaffolds from checkpoints"
 - Create: `rna_scaffold/pretrained.py`
 - Modify: `rna_scaffold/model.py`
 - Modify: `train.py`
-- Modify: `configs/train_stanford_1d.yaml`
+- Modify: `configs/train_scaffold_a800.yaml`
 - Test: `tests/test_pretrained_adapter.py`
 
 **Interfaces:**
@@ -335,7 +335,7 @@ Expected: PASS with the mocked encoder and with `kind="none"` on a machine witho
 - [ ] **Step 5: Commit the optional initializer**
 
 ```bash
-git add rna_scaffold/pretrained.py rna_scaffold/model.py train.py configs/train_stanford_1d.yaml tests/test_pretrained_adapter.py
+git add rna_scaffold/pretrained.py rna_scaffold/model.py train.py configs/train_scaffold_a800.yaml tests/test_pretrained_adapter.py
 git commit -m "feat: add optional RNA-FM initialization"
 ```
 

@@ -3,11 +3,14 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import torch
 
-from rna_scaffold.lightning_module import RnaScaffoldLitModule
 from rna_scaffold.tokenizer import RnaTokenizer
+
+if TYPE_CHECKING:
+    from rna_scaffold.lightning_module import RnaScaffoldLitModule
 
 
 class CheckpointCompatibilityError(RuntimeError):
@@ -30,14 +33,7 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_scaffold_checkpoint(
-    path: str | Path,
-    device: str | torch.device = "cpu",
-) -> LoadedScaffoldModel:
-    checkpoint_path = Path(path)
-    if not checkpoint_path.is_file():
-        raise FileNotFoundError(f"scaffold checkpoint not found: {checkpoint_path}")
-    payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+def validate_scaffold_checkpoint_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         raise CheckpointCompatibilityError("checkpoint root must be a mapping")
     architecture_version = payload.get("architecture_version")
@@ -45,6 +41,31 @@ def load_scaffold_checkpoint(
         raise CheckpointCompatibilityError(
             "checkpoint architecture_version 2 is required; the model must be retrained for V2"
         )
+    return payload
+
+
+def _read_checkpoint_payload(
+    path: str | Path,
+    device: str | torch.device = "cpu",
+) -> tuple[Path, dict]:
+    checkpoint_path = Path(path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"scaffold checkpoint not found: {checkpoint_path}")
+    payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    return checkpoint_path, validate_scaffold_checkpoint_payload(payload)
+
+
+def validate_scaffold_checkpoint_version(path: str | Path) -> None:
+    _read_checkpoint_payload(path, device="cpu")
+
+
+def load_scaffold_checkpoint(
+    path: str | Path,
+    device: str | torch.device = "cpu",
+) -> LoadedScaffoldModel:
+    from rna_scaffold.lightning_module import RnaScaffoldLitModule
+
+    checkpoint_path, payload = _read_checkpoint_payload(path, device=device)
     hparams = payload.get("hyper_parameters")
     state_dict = payload.get("state_dict")
     if not isinstance(hparams, dict):

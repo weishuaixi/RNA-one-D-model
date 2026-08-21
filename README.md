@@ -32,7 +32,8 @@ V2 故意不兼容旧 checkpoint。加载器只接受整数
 配置要求 1,815 条规范且唯一的 RNA、1,185 个 MMseqs2 连通分量，以及
 1,513/133/169 的 train/validation/test 记录数。安装脚本会在下载模型前验证字符、ID、
 规范化序列、cluster 完整性和跨 split 泄漏，并把两个源文件的 SHA-256、split manifest
-与计数写入 `outputs/server_setup/canonical_data_audit.json`。
+与计数写入 `outputs/server_setup/canonical_data_audit.json`。训练 datamodule 在构建 eligible
+manifest 时再次核对 1,185 个 cluster，不一致会在训练开始前失败。
 
 ```bash
 bash scripts/setup_server_env.sh
@@ -63,7 +64,8 @@ python -m pytest \
 python train.py --config configs/train_scaffold_a800.yaml
 ```
 
-中断后只从 V2 checkpoint 恢复；版本不符会在加载时失败：
+中断后只从 V2 checkpoint 恢复；无论 checkpoint 来自 `--resume` 还是配置文件，入口都会
+在调用 `Trainer.fit` 前检查版本，Lightning 的恢复 hook 也执行同一检查：
 
 ```bash
 python train.py \

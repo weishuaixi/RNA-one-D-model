@@ -56,6 +56,16 @@ def test_release_audit_records_truthful_check_states(tmp_path):
     assert boundary is not None
     assert boundary["status"] == "passed"
     assert boundary["violations"] == []
+    schemas = next(
+        (check for check in audit["checks"] if check["name"] == "V2 configuration schemas"),
+        None,
+    )
+    assert schemas is not None
+    assert schemas["status"] == "passed"
+    assert schemas["validated"] == [
+        "configs/benchmark_scaffolds.yaml",
+        "configs/train_scaffold_a800.yaml",
+    ]
     assert audit["server_training"]["status"] == "not_run"
 
 
@@ -71,6 +81,9 @@ def test_cpu_tiny_v2_workflow_trains_loads_generates_and_evaluates(tmp_path):
     assert evidence["optimizer_steps"] == 1
     assert evidence["training_loss_is_finite"] is True
     assert evidence["checkpoint_loaded"] is True
+    assert evidence["resume_checkpoint_validated"] is True
+    assert evidence["resume_path_v1_rejected"] is True
+    assert evidence["resume_hook_v1_rejected"] is True
     assert evidence["candidate_count"] >= 2
     assert evidence["motif_preservation_rate"] == 1.0
     assert evidence["unique_rate"] == 1.0

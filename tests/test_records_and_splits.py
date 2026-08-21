@@ -402,3 +402,40 @@ def test_formal_datamodule_requires_cluster_manifest_at_construction(tmp_path):
             train_data=str(source),
             task="motif_denoising",
         )
+
+
+def test_formal_datamodule_rejects_unexpected_eligible_cluster_count(tmp_path):
+    source = tmp_path / "records.csv"
+    source.write_text(
+        "target_id,sequence,family,source\n"
+        "a,AUGCAUGC,RF1,unit\n"
+        "b,CCGGCCGG,RF2,unit\n",
+        encoding="utf-8",
+    )
+    assignments = tmp_path / "clusters.tsv"
+    assignments.write_text(
+        "cluster_id\tsequence_id\tcluster_size\n"
+        "cluster_a\ta\t1\n"
+        "cluster_b\tb\t1\n",
+        encoding="utf-8",
+    )
+    module = RnaScaffoldDataModule(
+        tokenizer=RnaTokenizer(),
+        train_data=str(source),
+        cluster_manifest=str(assignments),
+        task="motif_denoising",
+        min_motif_length=4,
+        max_motif_length=4,
+        motif_length_buckets=None,
+        min_flank_length=2,
+        min_total_scaffold_length=0,
+        preferred_total_scaffold_length=0,
+        max_target_length=8,
+        val_fraction=0,
+        test_fraction=0,
+        expected_cluster_count=3,
+        seed=7,
+    )
+
+    with pytest.raises(ValueError, match="cluster count does not match expected"):
+        module.setup("fit")

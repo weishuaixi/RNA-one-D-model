@@ -9,6 +9,7 @@ try:
 except ImportError:  # pragma: no cover
     import pytorch_lightning as L
 
+from rna_scaffold.checkpoints import validate_scaffold_checkpoint_payload
 from rna_scaffold.model import MotifDenoisingTransformer, ScaffoldModelOutput, compute_denoising_losses
 from rna_scaffold.pretrained import (
     build_pretrained_encoder,
@@ -182,6 +183,9 @@ class RnaScaffoldLitModule(L.LightningModule):
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         checkpoint["architecture_version"] = 2
         checkpoint["pretrained_encoder"] = self.pretrained_metadata
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        validate_scaffold_checkpoint_payload(checkpoint)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
