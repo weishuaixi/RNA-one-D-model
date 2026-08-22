@@ -65,8 +65,11 @@ def test_release_audit_records_truthful_check_states(tmp_path):
     assert schemas["validated"] == [
         "configs/benchmark_scaffolds.yaml",
         "configs/train_scaffold_a800.yaml",
+        "configs/train_scaffold_frozen_rnafm_a800.yaml",
+        "configs/train_scaffold_no_rnafm_a800.yaml",
     ]
     assert audit["server_training"]["status"] == "not_run"
+    assert audit["formal_benchmark"]["status"] == "not_run"
 
 
 def test_cpu_tiny_v2_workflow_trains_loads_generates_and_evaluates(tmp_path):

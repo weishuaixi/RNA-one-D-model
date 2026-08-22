@@ -16,7 +16,7 @@ does not mean the CPU tiny model has useful biological performance.
 | RNA-FM none/frozen/LoRA modes | Explicit mode validation; no legacy boolean switch | `tests/test_pretrained_adapter.py`, `tests/test_training_config.py` |
 | RNA-FM LoRA boundary | Final-layer q/k/v/out projections receive input-dropout LoRA; base parameters stay frozen | `tests/test_pretrained_adapter.py` |
 | LoRA execution correctness | RNA-FM functional attention switches to its module path and all adapters receive finite gradients | `test_rna_fm_functional_attention_switches_to_adapter_aware_module_path` |
-| Pretrained provenance | Local RNA-FM hash, adapter targets/settings, and parameter counts enter checkpoint metadata | `test_lora_checkpoint_metadata_records_adapter_contract` |
+| Pretrained provenance | Pinned RNA-FM package plus reviewed expected/actual weight hashes, adapter settings, and versions enter metadata | `tests/test_pretrained_adapter.py`, `tests/test_final_review_contracts.py` |
 | Strict V2 checkpoint contract | Missing, older, boolean, float, and string versions are rejected by inference, CLI/config resume before `Trainer.fit`, and the Lightning restore hook; exact V2 round-trip is strict | `tests/test_checkpoint_loading.py`, `tests/test_training_resume.py` |
 | Confidence remasking | All scaffold positions are re-predicted; lowest raw-confidence positions are re-masked monotonically | `tests/test_iterative_decoding.py` |
 | Motif immutability | Motif is restored at every step and remains exact in final candidates | `tests/test_iterative_decoding.py`, `tests/test_generate.py` |
@@ -27,9 +27,9 @@ does not mean the CPU tiny model has useful biological performance.
 | Explicit checkpoint terminal states | Missing/failed checkpoint methods retain unavailable/failed state without heuristic fallback | `tests/test_benchmark_cli.py` |
 | Paired uncertainty | Motif-paired bootstrap is reproducible and uses only common motif IDs | `tests/test_scaffold_evaluation.py` |
 | RNAfold truthfulness | Optional adapter distinguishes not-run, unavailable, timeout, failure, parse error, and success | `tests/test_rnafold_validator.py`, `tests/test_benchmark_cli.py` |
-| Atomic six-artifact benchmark | New/empty output directory, exact artifact set, manifest hashes, and terminal status | `tests/test_benchmark_cli.py` |
+| Atomic six-artifact benchmark | Sibling staging is fully written, fsynced, hash-validated, then directory-renamed; partial runs are never published | `tests/test_benchmark_cli.py`, `tests/test_final_review_contracts.py` |
 | Runtime release boundary | Runtime Python/YAML are scanned for removed placement/loss interfaces, old fallback wording, and removed training entry points | `tests/test_package_boundary.py`, `tests/test_release_audit.py` |
-| V2 configuration boundary | The release audit constructs the only shipped training schema and normalizes the only benchmark schema; unsupported legacy configs are absent | `tests/test_training_config.py`, `tests/test_release_audit.py` |
+| V2 configuration boundary | Three matched training producers and the formal benchmark consumer are statically cross-validated; unsupported legacy configs are absent | `tests/test_training_config.py`, `tests/test_release_audit.py` |
 | CPU end-to-end release gate | One optimizer step writes a V2 checkpoint, public resume and load gates validate it, V1 resume paths are rejected, and at least two unique motif-preserved candidates are sequence-evaluated without RNAfold | `test_cpu_tiny_v2_workflow_trains_loads_generates_and_evaluates` |
 
 ## Reproducibility artifacts

@@ -4,8 +4,8 @@ from torch.utils.data import DataLoader
 
 pytest.importorskip("lightning.pytorch")
 
-from rna_scaffold.lightning_module import RnaScaffoldLitModule, compact_fixed_motifs
 from rna_scaffold.data import RnaMotifDenoisingDataset
+from rna_scaffold.lightning_module import RnaScaffoldLitModule, compact_fixed_motifs
 from rna_scaffold.model import ScaffoldModelOutput
 from rna_scaffold.records import RnaSequenceRecord
 from rna_scaffold.tokenizer import RnaTokenizer

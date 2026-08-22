@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-import csv
 from dataclasses import dataclass
-from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset
 
-from rna_scaffold.tokenizer import RnaTokenizer
-from rna_scaffold.utils import validate_rna_sequence
+from rna_scaffold.geometry import (
+    minimum_legal_total_length,
+    record_supports_legal_geometry,
+    validate_scaffold_length_limit,
+)
 from rna_scaffold.records import RnaSequenceRecord
 from rna_scaffold.splits import SplitManifest, build_cluster_disjoint_manifest
+from rna_scaffold.tokenizer import RnaTokenizer
 
 DEFAULT_MOTIF_LENGTH_BUCKETS = (
     (4, 15, 0.15),
@@ -19,68 +21,6 @@ DEFAULT_MOTIF_LENGTH_BUCKETS = (
     (64, 127, 0.20),
     (128, 512, 0.05),
 )
-
-_RNA_RESIDUE_TO_BASE = {
-    "A": "A",
-    "C": "C",
-    "G": "G",
-    "U": "U",
-    "RA": "A",
-    "RC": "C",
-    "RG": "G",
-    "RU": "U",
-}
-
-
-@dataclass(frozen=True)
-class ScaffoldExample:
-    motif: str
-    left_sequence: str
-    right_sequence: str
-
-
-@dataclass(frozen=True)
-class MaskedScaffoldExample:
-    """RNA scaffold inpainting example with functional bases kept fixed."""
-
-    masked_sequence: str
-    target_sequence: str
-    fixed_positions: tuple[int, ...]
-
-    @property
-    def fixed_sequence(self) -> str:
-        return "".join(self.target_sequence[position] for position in self.fixed_positions)
-
-    @classmethod
-    def from_mask_pattern(cls, target_sequence: str, mask_pattern: str) -> "MaskedScaffoldExample":
-        target = target_sequence.strip().upper().replace("T", "U")
-        pattern = mask_pattern.strip().upper().replace("T", "U")
-        if len(target) != len(pattern):
-            raise ValueError("target_sequence and mask_pattern must have the same length.")
-        if not validate_rna_sequence(target):
-            raise ValueError("target_sequence must contain only A, U, C, and G.")
-
-        masked_tokens: list[str] = []
-        fixed_positions: list[int] = []
-        for index, marker in enumerate(pattern):
-            if marker == "X":
-                masked_tokens.append("<MASK>")
-                continue
-            if marker not in "AUCG":
-                raise ValueError("mask_pattern must contain only A, U, C, G, or X.")
-            if marker != target[index]:
-                raise ValueError("Fixed bases in mask_pattern must match target_sequence.")
-            masked_tokens.append(marker)
-            fixed_positions.append(index)
-
-        if not fixed_positions:
-            raise ValueError("mask_pattern must keep at least one functional motif base fixed.")
-        return cls(
-            masked_sequence="".join(masked_tokens),
-            target_sequence=target,
-            fixed_positions=tuple(fixed_positions),
-        )
-
 
 @dataclass(frozen=True)
 class MotifScaffoldExample:
@@ -114,14 +54,20 @@ def sample_motif_example(
         raise ValueError("min_flank_length must be non-negative")
     if min_total_scaffold_length < 0:
         raise ValueError("min_total_scaffold_length must be non-negative")
-    hard_context = max(2 * min_flank_length, min_total_scaffold_length)
-    preferred_context = max(hard_context, preferred_total_scaffold_length)
-    required_context = (
-        preferred_context
-        if len(record.sequence) >= min_motif_length + preferred_context
-        else hard_context
+    minimum_total = minimum_legal_total_length(
+        min_motif_length,
+        min_flank_length,
+        min_total_scaffold_length,
     )
-    largest = len(record.sequence) - required_context
+    if preferred_total_scaffold_length < min_total_scaffold_length:
+        raise ValueError(
+            "preferred_total_scaffold_length must be at least min_total_scaffold_length"
+        )
+    if len(record.sequence) < minimum_total:
+        raise ValueError("sequence is too short for the requested motif and scaffold context")
+    # The preference is a soft total-canvas target. It never becomes extra
+    # motif-external context and therefore never excludes a legal shorter row.
+    largest = len(record.sequence) - 2 * min_flank_length
     if max_motif_length is not None:
         largest = min(max_motif_length, largest)
     if largest < min_motif_length:
@@ -188,11 +134,15 @@ class RnaMotifDenoisingDataset(Dataset):
         seed: int = 42,
         allow_empty: bool = False,
     ) -> None:
-        required_context = max(2 * min_flank_length, min_total_scaffold_length)
+        max_length = validate_scaffold_length_limit(max_length)
         self.input_record_count = len(records)
-        self.records = [
-            record for record in records if min_motif_length + required_context <= len(record.sequence)
-        ]
+        self.records = eligible_denoising_records(
+            records,
+            max_length=max_length,
+            min_motif_length=min_motif_length,
+            min_flank_length=min_flank_length,
+            min_total_scaffold_length=min_total_scaffold_length,
+        )
         self.excluded_record_count = self.input_record_count - len(self.records)
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -317,6 +267,29 @@ class RnaMotifDenoisingDataset(Dataset):
         return prediction
 
 
+def eligible_denoising_records(
+    records: list[RnaSequenceRecord],
+    *,
+    max_length: int,
+    min_motif_length: int,
+    min_flank_length: int,
+    min_total_scaffold_length: int,
+) -> list[RnaSequenceRecord]:
+    """Apply the exact V2 geometry eligibility contract before splitting."""
+    maximum = validate_scaffold_length_limit(max_length)
+    return [
+        record
+        for record in records
+        if record_supports_legal_geometry(
+            len(record.sequence),
+            max_length=maximum,
+            min_motif_length=min_motif_length,
+            min_flank_length=min_flank_length,
+            min_total_scaffold_length=min_total_scaffold_length,
+        )
+    ]
+
+
 def build_partitioned_denoising_datasets(
     records: list[RnaSequenceRecord],
     cluster_by_id: dict[str, str],
@@ -346,10 +319,14 @@ def build_partitioned_denoising_datasets(
     sequence_hashes = [record.sequence_sha256 for record in records]
     if len(sequence_hashes) != len(set(sequence_hashes)):
         raise ValueError("duplicate normalized sequence in formal training records")
-    required_context = max(2 * min_flank_length, min_total_scaffold_length)
-    eligible_records = [
-        record for record in records if min_motif_length + required_context <= len(record.sequence)
-    ]
+    max_length = validate_scaffold_length_limit(max_length)
+    eligible_records = eligible_denoising_records(
+        records,
+        max_length=max_length,
+        min_motif_length=min_motif_length,
+        min_flank_length=min_flank_length,
+        min_total_scaffold_length=min_total_scaffold_length,
+    )
     eligible_ids = {record.target_id for record in eligible_records}
     if set(cluster_by_id) != record_ids:
         unknown = sorted(set(cluster_by_id) - record_ids)
@@ -399,224 +376,3 @@ def build_partitioned_denoising_datasets(
     if sum(len(dataset) for dataset in datasets.values()) != manifest.record_counts["total"]:
         raise ValueError("partition totals must equal the eligible dataset total")
     return datasets, manifest
-
-
-class RnaScaffoldDataset(Dataset):
-    """Teacher-forcing dataset for motif-conditioned L/R scaffold generation."""
-
-    def __init__(
-        self,
-        examples: list[ScaffoldExample],
-        tokenizer: RnaTokenizer,
-        max_source_length: int,
-        max_target_length: int,
-    ) -> None:
-        self.examples = examples
-        self.tokenizer = tokenizer
-        self.max_source_length = max_source_length
-        self.max_target_length = max_target_length
-
-    def __len__(self) -> int:
-        return len(self.examples)
-
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        example = self.examples[index]
-        source = f"<BOS>{example.motif}<EOS>"
-        target = (
-            f"<BOS><LEFT>{example.left_sequence}<END_LEFT>"
-            f"<RIGHT>{example.right_sequence}<END_RIGHT><EOS>"
-        )
-        return {
-            "input_ids": self._encode_and_pad(source, self.max_source_length),
-            "labels": self._encode_and_pad(target, self.max_target_length),
-        }
-
-    def _encode_and_pad(self, text: str, max_length: int) -> torch.Tensor:
-        ids = self.tokenizer.encode(text)[:max_length]
-        ids += [self.tokenizer.pad_token_id] * (max_length - len(ids))
-        return torch.tensor(ids, dtype=torch.long)
-
-    @staticmethod
-    def examples_from_sequences(
-        sequences: list[str],
-        motif_length: int,
-        stem_length: int,
-        min_flank_length: int = 1,
-    ) -> list[ScaffoldExample]:
-        examples: list[ScaffoldExample] = []
-        for raw_sequence in sequences:
-            sequence = raw_sequence.strip().upper().replace("T", "U")
-            if len(sequence) < motif_length + 2 * min_flank_length:
-                continue
-            if not validate_rna_sequence(sequence):
-                continue
-            start = (len(sequence) - motif_length) // 2
-            end = start + motif_length
-            motif = sequence[start : start + motif_length]
-            left = sequence[max(0, start - stem_length) : start]
-            right = sequence[end : end + stem_length]
-            if len(left) < min_flank_length or len(right) < min_flank_length:
-                continue
-            examples.append(
-                ScaffoldExample(
-                    motif=motif,
-                    left_sequence=left,
-                    right_sequence=right,
-                )
-            )
-        return examples
-
-
-class RnaMaskedScaffoldDataset(Dataset):
-    """Teacher-forcing dataset for motif-fixed RNA scaffold inpainting."""
-
-    def __init__(
-        self,
-        examples: list[MaskedScaffoldExample],
-        tokenizer: RnaTokenizer,
-        max_source_length: int,
-        max_target_length: int,
-    ) -> None:
-        self.examples = examples
-        self.tokenizer = tokenizer
-        self.max_source_length = max_source_length
-        self.max_target_length = max_target_length
-
-    def __len__(self) -> int:
-        return len(self.examples)
-
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
-        example = self.examples[index]
-        source = f"<BOS>{example.masked_sequence}<EOS>"
-        target = f"<BOS>{example.target_sequence}<EOS>"
-        return {
-            "input_ids": self._encode_and_pad(source, self.max_source_length),
-            "labels": self._encode_and_pad(target, self.max_target_length),
-        }
-
-    def _encode_and_pad(self, text: str, max_length: int) -> torch.Tensor:
-        ids = self.tokenizer.encode(text)[:max_length]
-        ids += [self.tokenizer.pad_token_id] * (max_length - len(ids))
-        return torch.tensor(ids, dtype=torch.long)
-
-    @staticmethod
-    def examples_from_sequences(
-        sequences: list[str],
-        motif_length: int,
-        min_flank_length: int = 1,
-    ) -> list[MaskedScaffoldExample]:
-        examples: list[MaskedScaffoldExample] = []
-        for raw_sequence in sequences:
-            sequence = raw_sequence.strip().upper().replace("T", "U")
-            if len(sequence) < motif_length + 2 * min_flank_length:
-                continue
-            if not validate_rna_sequence(sequence):
-                continue
-            start = (len(sequence) - motif_length) // 2
-            end = start + motif_length
-            mask_pattern = "X" * start + sequence[start:end] + "X" * (len(sequence) - end)
-            examples.append(MaskedScaffoldExample.from_mask_pattern(sequence, mask_pattern))
-        return examples
-
-
-def load_fasta_sequences(path: str | Path) -> list[str]:
-    sequences: list[str] = []
-    current: list[str] = []
-    for line in Path(path).read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if line.startswith(">"):
-            if current:
-                sequences.append("".join(current))
-                current = []
-            continue
-        current.append(line)
-    if current:
-        sequences.append("".join(current))
-    return sequences
-
-
-def load_csv_sequences(path: str | Path) -> list[str]:
-    sequences: list[str] = []
-    with Path(path).open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not reader.fieldnames or "sequence" not in reader.fieldnames:
-            raise ValueError(f"CSV training data must contain a sequence column: {path}")
-        for row in reader:
-            sequence = (row.get("sequence") or "").strip()
-            if sequence:
-                sequences.append(sequence)
-    return sequences
-
-
-def load_pdb_rna_sequences(path: str | Path) -> list[str]:
-    """Extract RNA chain sequences from a PDB file.
-
-    Priority:
-    1. SEQRES records, because they contain the declared polymer sequence.
-    2. ATOM/HETATM residue order, useful for minimal/trimmed PDB files.
-
-    DNA residues and unknown modified bases are ignored by default.
-    """
-    pdb_path = Path(path)
-    text = pdb_path.read_text(encoding="utf-8", errors="ignore").splitlines()
-    seqres_chains: dict[str, list[str]] = {}
-    for line in text:
-        if not line.startswith("SEQRES"):
-            continue
-        chain_id = line[11].strip() or "_"
-        residues = line[19:].split()
-        bases = [_RNA_RESIDUE_TO_BASE[residue] for residue in residues if residue in _RNA_RESIDUE_TO_BASE]
-        if bases:
-            seqres_chains.setdefault(chain_id, []).extend(bases)
-
-    sequences = ["".join(bases) for bases in seqres_chains.values() if bases]
-    if sequences:
-        return sequences
-
-    atom_chains: dict[str, list[str]] = {}
-    seen_residues: set[tuple[str, str, str]] = set()
-    for line in text:
-        if not (line.startswith("ATOM") or line.startswith("HETATM")):
-            continue
-        residue = line[17:20].strip()
-        base = _RNA_RESIDUE_TO_BASE.get(residue)
-        if base is None:
-            continue
-        chain_id = line[21].strip() or "_"
-        residue_number = line[22:27].strip()
-        residue_key = (chain_id, residue_number, residue)
-        if residue_key in seen_residues:
-            continue
-        seen_residues.add(residue_key)
-        atom_chains.setdefault(chain_id, []).append(base)
-    return ["".join(bases) for bases in atom_chains.values() if bases]
-
-
-def load_sequences(path: str | Path) -> list[str]:
-    """Load RNA sequences from FASTA, CSV, a PDB file, or a directory of sequence files."""
-    source = Path(path)
-    if source.is_dir():
-        sequences: list[str] = []
-        files = sorted(
-            p
-            for p in source.rglob("*")
-            if p.is_file()
-            and (
-                p.suffix.lower() in {".pdb", ".ent", ".fa", ".fasta", ".fna"}
-                or (p.suffix.lower() == ".csv" and "sequences" in p.name.lower())
-            )
-        )
-        for file_path in files:
-            sequences.extend(load_sequences(file_path))
-        return sequences
-
-    suffix = source.suffix.lower()
-    if suffix in {".pdb", ".ent"}:
-        return load_pdb_rna_sequences(source)
-    if suffix in {".fa", ".fasta", ".fna"}:
-        return load_fasta_sequences(source)
-    if suffix == ".csv":
-        return load_csv_sequences(source)
-    raise ValueError(f"Unsupported training data format: {source}")

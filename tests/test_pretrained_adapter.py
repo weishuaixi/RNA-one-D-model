@@ -9,7 +9,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-import rna_scaffold.pretrained as pretrained
+from rna_scaffold import pretrained
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
 from rna_scaffold.model import MotifDenoisingTransformer
 from rna_scaffold.pretrained import (
@@ -285,7 +285,12 @@ def test_none_pretrained_encoder_has_no_optional_dependency():
 def test_frozen_pretrained_encoder_has_no_trainable_parameters(monkeypatch):
     monkeypatch.setattr(pretrained, "load_rna_fm", lambda _: TinyEncoder())
     encoder = build_pretrained_encoder(
-        PretrainedEncoderConfig(kind="rna_fm", checkpoint="fake.pt", mode="frozen")
+        PretrainedEncoderConfig(
+            kind="rna_fm",
+            checkpoint="fake.pt",
+            expected_checkpoint_sha256="0" * 64,
+            mode="frozen",
+        )
     )
 
     assert encoder is not None
@@ -407,6 +412,7 @@ def test_lora_checkpoint_metadata_records_adapter_contract(monkeypatch, tmp_path
     config = PretrainedEncoderConfig(
         kind="rna_fm",
         checkpoint=str(checkpoint_path),
+        expected_checkpoint_sha256=hashlib.sha256(checkpoint_path.read_bytes()).hexdigest(),
         mode="lora",
         lora_rank=3,
         lora_alpha=9.0,

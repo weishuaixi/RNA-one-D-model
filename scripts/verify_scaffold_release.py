@@ -24,6 +24,21 @@ _REMOVED_RUNTIME_TERMS = (
     "length" + "_loss_weight",
     "train" + "_3d",
     "checkpoints_scaffold_a800" + "_mmseqs80",
+    "Scaffold" + "Example",
+    "MaskedScaffold" + "Example",
+    "Rna" + "ScaffoldDataset",
+    "Rna" + "MaskedScaffoldDataset",
+    "Masked" + "ScaffoldPrompt",
+    "Scaffold" + "Result",
+    "build_motif_" + "scaffold_sequence",
+    "build_auto_masked_" + "scaffold_prompts",
+    "build_random_natural_" + "scaffold_result",
+    "build_single_" + "best_result",
+    "generate_markov_" + "baseline",
+    "greedy_decode_" + "left_seed",
+    "unresolved_" + "counts",
+    "flank_" + "scaffold",
+    "masked_" + "scaffold",
 )
 _REMOVED_FALLBACK_PATTERN = re.compile(
     "(?i)(?:v" + "1.{0,40}fallback|fallback.{0,40}v" + "1)"
@@ -77,6 +92,29 @@ def _audit_v2_runtime_boundary(root: Path = ROOT) -> dict:
                     "terms": matched,
                 }
             )
+    benchmark_prior = "RnaTraining" + "Prior"
+    allowed_prior_paths = {
+        "benchmark_scaffolds.py",
+        "rna_scaffold/benchmarking.py",
+    }
+    for path in _runtime_files(root):
+        relative = str(path.relative_to(root)).replace("\\", "/")
+        if benchmark_prior in path.read_text(encoding="utf-8") and relative not in allowed_prior_paths:
+            violations.append(
+                {
+                    "path": relative,
+                    "terms": ["benchmark prior outside benchmark namespace"],
+                }
+            )
+    import rna_scaffold
+
+    public_forbidden = [
+        symbol
+        for symbol in _REMOVED_RUNTIME_TERMS
+        if symbol.isidentifier() and hasattr(rna_scaffold, symbol)
+    ]
+    if public_forbidden:
+        violations.append({"path": "rna_scaffold/__init__.py", "terms": public_forbidden})
     return {
         "name": "V2 runtime boundary",
         "status": "failed" if violations else "passed",
@@ -88,6 +126,8 @@ def _audit_v2_configuration_schemas(root: Path = ROOT) -> dict:
     expected = {
         "benchmark_scaffolds.yaml",
         "train_scaffold_a800.yaml",
+        "train_scaffold_frozen_rnafm_a800.yaml",
+        "train_scaffold_no_rnafm_a800.yaml",
     }
     config_root = root / "configs"
     actual_paths = sorted(
@@ -112,19 +152,14 @@ def _audit_v2_configuration_schemas(root: Path = ROOT) -> dict:
             continue
         try:
             config = yaml.safe_load(path.read_text(encoding="utf-8"))
-            if path.name == "train_scaffold_a800.yaml":
+            if path.name.startswith("train_scaffold"):
                 from train import validate_training_config
 
                 validate_training_config(config)
             else:
-                from benchmark_scaffolds import _normalise_method_specs, _normalise_motifs
+                from benchmark_scaffolds import validate_benchmark_config
 
-                _normalise_method_specs(config, smoke_test=False)
-                _normalise_motifs(config)
-                if int(config.get("candidate_count", 0)) <= 0:
-                    raise ValueError("benchmark candidate_count must be positive")
-                if int(config.get("bootstrap_samples", 0)) <= 0:
-                    raise ValueError("benchmark bootstrap_samples must be positive")
+                validate_benchmark_config(path)
         except (ImportError, KeyError, TypeError, ValueError, yaml.YAMLError) as error:
             violations.append({"path": relative, "error": f"{type(error).__name__}: {error}"})
         else:
@@ -182,7 +217,7 @@ def run_cpu_tiny_v2_workflow(work_dir: str | Path) -> dict:
         "dropout": 0.0,
         "max_length": 12,
         "activation_checkpointing": False,
-        "pretrained": {"kind": "none", "mode": "frozen"},
+        "pretrained": {"kind": "none"},
         "lr": 1e-3,
         "weight_decay": 0.0,
         "left_length_loss_weight": 0.25,
@@ -351,6 +386,8 @@ def main() -> None:
     ).stdout.splitlines()
     tracked_artifacts = [
         ROOT / "configs" / "train_scaffold_a800.yaml",
+        ROOT / "configs" / "train_scaffold_frozen_rnafm_a800.yaml",
+        ROOT / "configs" / "train_scaffold_no_rnafm_a800.yaml",
         ROOT / "configs" / "benchmark_scaffolds.yaml",
     ]
     audit = {
@@ -363,6 +400,10 @@ def main() -> None:
         "server_training": {
             "status": "not_run",
             "reason": "full A800 training and checkpoint metrics must be produced on the server",
+        },
+        "formal_benchmark": {
+            "status": "not_run",
+            "reason": "formal held-out benchmark requires canonical data and three completed A800 training manifests",
         },
         "artifact_sha256": {
             str(path.relative_to(ROOT)): _sha256(path) for path in tracked_artifacts if path.is_file()

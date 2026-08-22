@@ -3,9 +3,9 @@ from __future__ import annotations
 import csv
 import hashlib
 import random
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Mapping, Sequence
 
 from rna_scaffold.records import RnaSequenceRecord
 
@@ -42,7 +42,7 @@ def _group_key(record: RnaSequenceRecord) -> str:
 
 
 def _partition_for_group(group_key: str, seed: int) -> str:
-    digest = hashlib.sha256(f"{seed}:{group_key}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{seed}:{group_key}".encode()).digest()
     bucket = int.from_bytes(digest[:8], "big") % 100
     if bucket < 80:
         return "train"

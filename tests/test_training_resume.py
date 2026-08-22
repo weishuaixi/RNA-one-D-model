@@ -1,4 +1,5 @@
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -39,12 +40,25 @@ def _run_train_main(monkeypatch, checkpoint, resume_source):
     monkeypatch.setattr(train, "load_config", lambda _: config)
     monkeypatch.setattr(train.L, "seed_everything", lambda *args, **kwargs: None)
     monkeypatch.setattr(train.L, "Trainer", RecordingTrainer)
-    monkeypatch.setattr(train, "RnaScaffoldDataModule", lambda **kwargs: object())
-    monkeypatch.setattr(train, "RnaScaffoldLitModule", lambda **kwargs: object())
-    monkeypatch.setattr(train, "ModelCheckpoint", lambda **kwargs: object())
+    monkeypatch.setattr(
+        train,
+        "RnaScaffoldDataModule",
+        lambda **kwargs: SimpleNamespace(split_manifest=None, denoising_data_audit={}),
+    )
+    monkeypatch.setattr(
+        train,
+        "RnaScaffoldLitModule",
+        lambda **kwargs: SimpleNamespace(pretrained_metadata={"kind": "none"}),
+    )
+    monkeypatch.setattr(
+        train,
+        "ModelCheckpoint",
+        lambda **kwargs: SimpleNamespace(best_model_path="unused.ckpt"),
+    )
     monkeypatch.setattr(train, "EarlyStopping", lambda **kwargs: object())
     monkeypatch.setattr(train, "LearningRateMonitor", lambda **kwargs: object())
     monkeypatch.setattr(train, "WandbLogger", lambda **kwargs: object())
+    monkeypatch.setattr(train, "write_training_manifest", lambda *args, **kwargs: {})
     argv = ["train.py", "--config", "unused.yaml"]
     if resume_source == "cli":
         argv.extend(["--resume", str(checkpoint)])

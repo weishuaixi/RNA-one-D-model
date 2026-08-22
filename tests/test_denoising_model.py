@@ -73,13 +73,13 @@ def test_denoising_loss_excludes_fixed_motif_positions():
         left_length_logits=torch.tensor([[0.0, 0.0, 8.0, 0.0, 0.0]]),
         right_length_logits=torch.tensor([[0.0, 0.0, 0.0, 8.0, 0.0]]),
     )
-    common = dict(
-        output=output,
-        fixed_mask=torch.tensor([[False, True]]),
-        attention_mask=torch.tensor([[True, True]]),
-        target_left_length=torch.tensor([2]),
-        target_right_length=torch.tensor([3]),
-    )
+    common = {
+        "output": output,
+        "fixed_mask": torch.tensor([[False, True]]),
+        "attention_mask": torch.tensor([[True, True]]),
+        "target_left_length": torch.tensor([2]),
+        "target_right_length": torch.tensor([3]),
+    }
 
     first = compute_denoising_losses(target_base_ids=torch.tensor([[0, 0]]), **common)
     changed_fixed_target = compute_denoising_losses(target_base_ids=torch.tensor([[0, 3]]), **common)
@@ -94,14 +94,14 @@ def test_denoising_loss_excludes_fixed_motif_even_when_prediction_mask_includes_
         left_length_logits=torch.tensor([[0.0, 0.0, 8.0, 0.0, 0.0]]),
         right_length_logits=torch.tensor([[0.0, 0.0, 0.0, 8.0, 0.0]]),
     )
-    common = dict(
-        output=output,
-        fixed_mask=torch.tensor([[False, True]]),
-        attention_mask=torch.tensor([[True, True]]),
-        prediction_mask=torch.tensor([[True, True]]),
-        target_left_length=torch.tensor([2]),
-        target_right_length=torch.tensor([3]),
-    )
+    common = {
+        "output": output,
+        "fixed_mask": torch.tensor([[False, True]]),
+        "attention_mask": torch.tensor([[True, True]]),
+        "prediction_mask": torch.tensor([[True, True]]),
+        "target_left_length": torch.tensor([2]),
+        "target_right_length": torch.tensor([3]),
+    }
 
     first = compute_denoising_losses(target_base_ids=torch.tensor([[0, 0]]), **common)
     changed_fixed_target = compute_denoising_losses(target_base_ids=torch.tensor([[0, 3]]), **common)
@@ -115,14 +115,14 @@ def test_denoising_losses_supervise_left_and_right_lengths_independently():
         left_length_logits=torch.tensor([[0.0, 0.0, 8.0, 0.0, 0.0]]),
         right_length_logits=torch.tensor([[0.0, 0.0, 0.0, 8.0, 0.0]]),
     )
-    common = dict(
-        output=output,
-        target_base_ids=torch.tensor([[0, 0]]),
-        fixed_mask=torch.tensor([[False, True]]),
-        attention_mask=torch.tensor([[True, True]]),
-        target_left_length=torch.tensor([2]),
-        target_right_length=torch.tensor([3]),
-    )
+    common = {
+        "output": output,
+        "target_base_ids": torch.tensor([[0, 0]]),
+        "fixed_mask": torch.tensor([[False, True]]),
+        "attention_mask": torch.tensor([[True, True]]),
+        "target_left_length": torch.tensor([2]),
+        "target_right_length": torch.tensor([3]),
+    }
 
     expected = compute_denoising_losses(**common)
     changed_left = compute_denoising_losses(**(common | {"target_left_length": torch.tensor([1])}))

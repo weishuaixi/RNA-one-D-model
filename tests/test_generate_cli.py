@@ -2,8 +2,9 @@ import json
 import subprocess
 import sys
 
-import generate_scaffold
 import pytest
+
+import generate_scaffold
 from rna_scaffold.generate import (
     CandidateGenerationAudit,
     GeneratedCandidates,

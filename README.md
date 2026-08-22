@@ -23,24 +23,29 @@ V2 故意不兼容旧 checkpoint。加载器只接受整数
 
 ## 唯一权威服务器流程
 
-以下流程均从仓库根目录执行，唯一正式训练配置是
-`configs/train_scaffold_a800.yaml`。先把两个规范输入放在配置指定位置：
+以下流程均从仓库根目录执行。正式 matched 训练配置为
+`configs/train_scaffold_no_rnafm_a800.yaml`、
+`configs/train_scaffold_frozen_rnafm_a800.yaml` 和
+`configs/train_scaffold_a800.yaml`（LoRA primary）。先把两个规范输入放在配置指定位置：
 
 - `data/processed/rna_merged_mmseqs80.csv`
 - `outputs/mmseqs80_search/rna80_connected_components.tsv`
 
-配置要求 1,815 条规范且唯一的 RNA、1,185 个 MMseqs2 连通分量，以及
-1,513/133/169 的 train/validation/test 记录数。安装脚本会在下载模型前验证字符、ID、
+配置保留原先的 1,815 条规范且唯一 RNA、1,185 个 eligible MMseqs2 连通分量，以及
+1,513/133/169 train/validation/test 记录数断言。由于 V2 最短合法 canvas 已修正为 total-canvas
+语义，这些计数必须由服务器上的 canonical audit 重新确认；不一致会 fail-closed，不能沿用旧计数作证据。安装脚本会在下载模型前验证字符、ID、
 规范化序列、cluster 完整性和跨 split 泄漏，并把两个源文件的 SHA-256、split manifest
 与计数写入 `outputs/server_setup/canonical_data_audit.json`。训练 datamodule 在构建 eligible
 manifest 时再次核对 1,185 个 cluster，不一致会在训练开始前失败。
 
 ```bash
+export RNA_FM_EXPECTED_SHA256=<REVIEWED_64_HEX_DIGEST>
 bash scripts/setup_server_env.sh
 source .venv/bin/activate
 ```
 
-脚本把官方 `RNA-FM_pretrained.pth` 缓存到
+环境变量必须来自人工审核过的官方权重；仓库不会捏造该 digest。脚本安装固定的
+`rna-fm==0.2.2`，把官方 `RNA-FM_pretrained.pth` 缓存到
 `.cache/torch/hub/checkpoints/RNA-FM_pretrained.pth`，记录其 SHA-256 到
 `outputs/server_setup/rna_fm_sha256.txt`，并运行完整 release audit。正式配置显式引用
 该文件，因此 checkpoint 元数据能够记录 RNA-FM 权重 hash。默认 LoRA 边界为最后 4 层
@@ -61,21 +66,25 @@ python -m pytest \
 ### 完整 A800 训练与恢复
 
 ```bash
+python train.py --config configs/train_scaffold_no_rnafm_a800.yaml
+python train.py --config configs/train_scaffold_frozen_rnafm_a800.yaml
 python train.py --config configs/train_scaffold_a800.yaml
 ```
 
-中断后只从 V2 checkpoint 恢复；无论 checkpoint 来自 `--resume` 还是配置文件，入口都会
-在调用 `Trainer.fit` 前检查版本，Lightning 的恢复 hook 也执行同一检查：
+中断后只从自己控制且可信的 V2 checkpoint 恢复。推理/preflight 使用受限
+`weights_only=True` 读取；Lightning resume 仍是 trusted-only pickle 恢复路径，版本预检不是
+不可信 checkpoint 的安全沙箱。入口会在调用 `Trainer.fit` 前检查版本，Lightning hook 也检查：
 
 ```bash
 python train.py \
   --config configs/train_scaffold_a800.yaml \
-  --resume checkpoints_scaffold_a800/last.ckpt
+  --resume checkpoints_scaffold_lora_rnafm_a800/last.ckpt
 ```
 
-完整运行应保留 `last.ckpt` 和按 validation loss 选择的 checkpoint。用于正式 benchmark
-的 no-RNA-FM、frozen RNA-FM、LoRA iterative 与 single-pass 路径必须分别指向真实 V2
-checkpoint；缺失或推理失败会被明确标为 `unavailable`/`failed`，绝不替换成 baseline。
+每次完整训练会原子写出 `training_manifest.json`，绑定 validation-loss 最优 checkpoint、
+checkpoint/config hash、实际 pretrained identity、split audit 与软件版本。正式 benchmark 只消费
+三份 training manifest；no-RNA-FM、frozen、LoRA identity 不符会终态 `failed`，缺失会标为
+`unavailable`，绝不替换成 baseline。single-pass 与 iterative 使用同一份经验证 LoRA checkpoint。
 
 ### 生成与 RNAfold 验证
 
@@ -119,7 +128,14 @@ python benchmark_scaffolds.py \
   --smoke-test
 ```
 
-正式运行前，先把 `configs/benchmark_scaffolds.yaml` 中声明的所有 V2 checkpoint 放到位：
+formal 配置静态检查不读取缺失的科学产物，并如实列出待办：
+
+```bash
+python benchmark_scaffolds.py --config configs/benchmark_scaffolds.yaml --dry-run
+```
+
+正式运行从 cluster-disjoint split 重建 train-only Markov/nearest-training reference，并从 held-out
+test split 确定性生成带来源/hash/strata 的 48-motif panel。先完成三份 training manifest，再运行：
 
 ```bash
 BENCHMARK_DIR="outputs/v2_formal_$(date -u +%Y%m%dT%H%M%SZ)"
@@ -129,7 +145,8 @@ python benchmark_scaffolds.py \
   --output-dir "${BENCHMARK_DIR}"
 ```
 
-六个 artifact 为 `candidate_results.csv`、`motif_summary.csv`、`model_summary.csv`、
+六个 artifact 先写入同一父目录下的 sibling staging directory，全部 fsync、hash、校验后才通过
+目录 rename 发布；目标目录非空仍 fail-closed。artifact 为 `candidate_results.csv`、`motif_summary.csv`、`model_summary.csv`、
 `paired_bootstrap.json`、`run_manifest.json` 和 `benchmark_report.md`。manifest 记录命令、
 seed、配置/数据/checkpoint hash、软件版本、方法终态与 artifact hash。
 

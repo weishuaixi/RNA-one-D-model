@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
+from rna_scaffold.geometry import legal_flank_pairs
 from rna_scaffold.model import ScaffoldModelOutput
 from rna_scaffold.tokenizer import RnaTokenizer
 
@@ -36,10 +37,87 @@ class DecodedScaffold:
     normalized_log_probability: float
     masked_counts: tuple[int, ...]
 
-    @property
-    def unresolved_counts(self) -> tuple[int, ...]:
-        """Compatibility alias for the V1 decoder field name."""
-        return self.masked_counts
+
+
+@dataclass
+class FlankPairSampler:
+    """Cached joint flank distribution with an encoded without-replacement mask."""
+
+    pairs: torch.Tensor
+    pair_scores: torch.Tensor
+    pair_ids: torch.Tensor
+    used_pair_id_mask: torch.Tensor
+
+    def select(
+        self,
+        generator: torch.Generator,
+        *,
+        sample: bool = True,
+    ) -> tuple[int, int]:
+        available = ~self.used_pair_id_mask[self.pair_ids]
+        if not bool(available.any().item()):
+            # More candidates than legal geometries may still explore different
+            # sequences. Start a new without-replacement cycle without rebuilding
+            # or copying the legal-pair tensor.
+            self.used_pair_id_mask.zero_()
+            available = torch.ones_like(available)
+        available_scores = self.pair_scores.masked_fill(~available, float("-inf"))
+        if sample:
+            probabilities = torch.softmax(available_scores, dim=0)
+            index = int(torch.multinomial(probabilities, 1, generator=generator).item())
+        else:
+            index = int(torch.argmax(available_scores).item())
+        pair_id = int(self.pair_ids[index].item())
+        self.used_pair_id_mask[pair_id] = True
+        return int(self.pairs[index, 0].item()), int(self.pairs[index, 1].item())
+
+
+def build_flank_pair_sampler(
+    output: ScaffoldModelOutput,
+    motif_length: int,
+    max_length: int,
+    *,
+    min_scaffold_length: int = 1,
+    min_flank_length: int = 0,
+    excluded_pairs: set[tuple[int, int]] | None = None,
+) -> FlankPairSampler:
+    if output.left_length_logits.shape[0] != 1 or output.right_length_logits.shape[0] != 1:
+        raise ValueError("flank-length selection currently requires batch size one")
+    left_log_probs = output.left_length_logits[0].float().log_softmax(dim=-1)
+    right_log_probs = output.right_length_logits[0].float().log_softmax(dim=-1)
+    model_max_length = min(
+        left_log_probs.shape[-1] - 1,
+        right_log_probs.shape[-1] - 1,
+    )
+    pairs = legal_flank_pairs(
+        motif_length,
+        min_flank_length=min_flank_length,
+        min_total_scaffold_length=min_scaffold_length,
+        requested_max_length=int(max_length),
+        model_max_length=model_max_length,
+        device=left_log_probs.device,
+    )
+    if pairs.numel() == 0:
+        raise ValueError("motif cannot fit within the requested maximum length")
+    pair_scores = left_log_probs[pairs[:, 0]] + right_log_probs[pairs[:, 1]]
+    stride = model_max_length + 1
+    pair_ids = pairs[:, 0] * stride + pairs[:, 1]
+    used_pair_id_mask = torch.zeros(
+        stride * stride,
+        dtype=torch.bool,
+        device=pairs.device,
+    )
+    if excluded_pairs:
+        encoded = [
+            int(left_length) * stride + int(right_length)
+            for left_length, right_length in excluded_pairs
+            if 0 <= int(left_length) < stride and 0 <= int(right_length) < stride
+        ]
+        if encoded:
+            used_pair_id_mask[
+                torch.tensor(encoded, dtype=torch.long, device=pairs.device)
+            ] = True
+    return FlankPairSampler(pairs, pair_scores, pair_ids, used_pair_id_mask)
 
 
 def select_flank_lengths(
@@ -52,42 +130,15 @@ def select_flank_lengths(
     min_flank_length: int = 0,
     excluded_pairs: set[tuple[int, int]] | None = None,
 ) -> tuple[int, int]:
-    if output.left_length_logits.shape[0] != 1 or output.right_length_logits.shape[0] != 1:
-        raise ValueError("flank-length selection currently requires batch size one")
-    if min_scaffold_length < 1 or min_flank_length < 0:
-        raise ValueError("invalid minimum scaffold or flank length")
-    left_log_probs = output.left_length_logits[0].float().log_softmax(dim=-1)
-    right_log_probs = output.right_length_logits[0].float().log_softmax(dim=-1)
-    largest_flank = min(
-        left_log_probs.shape[-1] - 1,
-        right_log_probs.shape[-1] - 1,
-        int(max_length) - motif_length - min_flank_length,
+    sampler = build_flank_pair_sampler(
+        output,
+        motif_length,
+        max_length,
+        min_scaffold_length=min_scaffold_length,
+        min_flank_length=min_flank_length,
+        excluded_pairs=excluded_pairs,
     )
-    if largest_flank < min_flank_length:
-        raise ValueError("motif cannot fit within the requested maximum length")
-    lengths = torch.arange(min_flank_length, largest_flank + 1, device=left_log_probs.device)
-    pairs = torch.cartesian_prod(lengths, lengths)
-    total_lengths = pairs[:, 0] + motif_length + pairs[:, 1]
-    legal_pairs = pairs[
-        (total_lengths >= min_scaffold_length) & (total_lengths <= int(max_length))
-    ]
-    if legal_pairs.numel() == 0:
-        raise ValueError("motif cannot fit within the requested maximum length")
-    if excluded_pairs:
-        allowed = torch.tensor(
-            [tuple(int(length) for length in pair.tolist()) not in excluded_pairs for pair in legal_pairs],
-            device=legal_pairs.device,
-            dtype=torch.bool,
-        )
-        if allowed.any():
-            legal_pairs = legal_pairs[allowed]
-    pair_scores = left_log_probs[legal_pairs[:, 0]] + right_log_probs[legal_pairs[:, 1]]
-    if sample:
-        probabilities = torch.softmax(pair_scores, dim=0)
-        index = int(torch.multinomial(probabilities, 1, generator=generator).item())
-    else:
-        index = int(torch.argmax(pair_scores).item())
-    return tuple(int(length) for length in legal_pairs[index].tolist())
+    return sampler.select(generator, sample=sample)
 
 
 def _filtered_probabilities(logits: torch.Tensor, settings: DecodingSettings) -> torch.Tensor:

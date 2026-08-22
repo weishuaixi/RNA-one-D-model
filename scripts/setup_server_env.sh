@@ -19,6 +19,11 @@ for required_file in "${SEQUENCE_TABLE}" "${CLUSTER_MANIFEST}"; do
   fi
 done
 
+if [[ ! "${RNA_FM_EXPECTED_SHA256:-}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "ERROR: set RNA_FM_EXPECTED_SHA256 to the reviewed 64-hex RNA-FM weight digest." >&2
+  exit 2
+fi
+
 python3 -m venv .venv
 source .venv/bin/activate
 
@@ -79,6 +84,8 @@ PY
 
 python - <<'PY'
 import hashlib
+import importlib.metadata
+import os
 from pathlib import Path
 
 import fm
@@ -89,6 +96,11 @@ checkpoint = Path(torch.hub.get_dir()) / "checkpoints" / "RNA-FM_pretrained.pth"
 if not checkpoint.is_file():
     raise SystemExit(f"ERROR: RNA-FM cache download did not create {checkpoint}")
 digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+expected_digest = os.environ["RNA_FM_EXPECTED_SHA256"].strip().lower()
+if digest != expected_digest:
+    raise SystemExit(
+        f"ERROR: RNA-FM checkpoint SHA-256 mismatch: expected={expected_digest}, actual={digest}"
+    )
 expected = Path(".cache/torch/hub/checkpoints/RNA-FM_pretrained.pth").resolve()
 if checkpoint.resolve() != expected:
     raise SystemExit(f"ERROR: RNA-FM cache path mismatch: {checkpoint.resolve()} != {expected}")
@@ -98,6 +110,7 @@ Path("outputs/server_setup/rna_fm_sha256.txt").write_text(
 )
 print("rna_fm_checkpoint", checkpoint)
 print("rna_fm_sha256", digest)
+print("rna_fm_version", importlib.metadata.version("rna-fm"))
 PY
 
 python scripts/verify_scaffold_release.py \

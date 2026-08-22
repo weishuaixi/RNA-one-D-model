@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from rna_scaffold.geometry import validate_scaffold_length_limit
 from rna_scaffold.tokenizer import RnaTokenizer
 
 if TYPE_CHECKING:
@@ -23,6 +24,8 @@ class LoadedScaffoldModel:
     tokenizer: RnaTokenizer
     checkpoint_sha256: str
     max_length: int
+    architecture_version: int
+    pretrained_metadata: dict
 
 
 def _sha256(path: Path) -> str:
@@ -41,6 +44,15 @@ def validate_scaffold_checkpoint_payload(payload: object) -> dict:
         raise CheckpointCompatibilityError(
             "checkpoint architecture_version 2 is required; the model must be retrained for V2"
         )
+    hparams = payload.get("hyper_parameters")
+    if isinstance(hparams, dict) and "max_length" in hparams:
+        try:
+            validate_scaffold_length_limit(
+                hparams["max_length"],
+                field="checkpoint hyper_parameters.max_length",
+            )
+        except (TypeError, ValueError) as error:
+            raise CheckpointCompatibilityError(str(error)) from error
     return payload
 
 
@@ -51,7 +63,7 @@ def _read_checkpoint_payload(
     checkpoint_path = Path(path)
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"scaffold checkpoint not found: {checkpoint_path}")
-    payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    payload = torch.load(checkpoint_path, map_location=device, weights_only=True)
     return checkpoint_path, validate_scaffold_checkpoint_payload(payload)
 
 
@@ -90,9 +102,21 @@ def load_scaffold_checkpoint(
         raise CheckpointCompatibilityError(f"checkpoint state_dict is incompatible: {error}") from error
     model.to(device)
     model.eval()
+    raw_metadata = payload.get("pretrained_encoder")
+    if isinstance(raw_metadata, dict):
+        pretrained = dict(raw_metadata)
+    else:
+        raw_pretrained = hparams.get("pretrained")
+        pretrained = dict(raw_pretrained) if isinstance(raw_pretrained, dict) else {"kind": "none"}
+    pretrained.setdefault("kind", "none")
+    pretrained.setdefault("mode", "frozen")
+    if pretrained["kind"] == "none":
+        pretrained["mode"] = "none"
     return LoadedScaffoldModel(
         model=model,
         tokenizer=tokenizer,
         checkpoint_sha256=_sha256(checkpoint_path),
         max_length=model.model.max_length,
+        architecture_version=2,
+        pretrained_metadata=pretrained,
     )

@@ -2,6 +2,7 @@ import random
 
 import pytest
 
+from rna_scaffold.benchmarking import RnaTrainingPrior
 from rna_scaffold.evaluation import (
     CandidateMetric,
     maximum_homopolymer_run,
@@ -12,7 +13,6 @@ from rna_scaffold.evaluation import (
     summarize_candidates,
     within_group_diversity,
 )
-from rna_scaffold.generate import RnaTrainingPrior
 
 
 def test_training_prior_distinguishes_first_and_second_order_contexts():

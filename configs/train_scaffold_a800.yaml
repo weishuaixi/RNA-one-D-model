@@ -2,7 +2,7 @@ seed: 42
 
 wandb:
   project: rna-one-d-model
-  name: scaffold-a800-accuracy-512
+  name: scaffold-a800-lora-rnafm-v2
   entity:
   log_model: false
 
@@ -34,7 +34,6 @@ data:
   min_random_mask_fraction: 0.30
   max_random_mask_fraction: 0.80
   mean_span_length: 8
-  max_source_length: 512
   max_target_length: 512
   batch_size: 8
   num_workers: 12
@@ -55,6 +54,7 @@ model:
     # setup_server_env.sh downloads and hashes this exact release input.
     kind: rna_fm
     checkpoint: .cache/torch/hub/checkpoints/RNA-FM_pretrained.pth
+    expected_checkpoint_sha256_env: RNA_FM_EXPECTED_SHA256
     mode: lora
     lora_rank: 8
     lora_alpha: 16.0
@@ -69,7 +69,7 @@ model:
   min_lr_fraction: 0.02
 
 trainer:
-  checkpoint_dir: checkpoints_scaffold_a800
+  checkpoint_dir: checkpoints_scaffold_lora_rnafm_a800
   early_stopping_patience: 12
   resume_from_checkpoint:
   args:

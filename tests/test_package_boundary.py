@@ -8,6 +8,21 @@ FORBIDDEN_V1_RUNTIME_TERMS = (
     "length_loss_weight",
     "train_3d",
     "checkpoints_scaffold_a800_mmseqs80",
+    "ScaffoldExample",
+    "MaskedScaffoldExample",
+    "RnaScaffoldDataset",
+    "RnaMaskedScaffoldDataset",
+    "MaskedScaffoldPrompt",
+    "ScaffoldResult",
+    "build_motif_scaffold_sequence",
+    "build_auto_masked_scaffold_prompts",
+    "build_random_natural_scaffold_result",
+    "build_single_best_result",
+    "generate_markov_baseline",
+    "greedy_decode_left_seed",
+    "unresolved_counts",
+    "flank_scaffold",
+    "masked_scaffold",
 )
 
 
@@ -44,6 +59,8 @@ def test_only_supported_v2_runtime_configs_are_shipped():
     assert sorted(path.name for path in (root / "configs").glob("*.yaml")) == [
         "benchmark_scaffolds.yaml",
         "train_scaffold_a800.yaml",
+        "train_scaffold_frozen_rnafm_a800.yaml",
+        "train_scaffold_no_rnafm_a800.yaml",
     ]
 
 
@@ -64,3 +81,15 @@ def test_runtime_sources_and_configuration_do_not_reference_v1_boundaries():
             violations[str(path.relative_to(root))] = matched
 
     assert violations == {}
+
+
+def test_markov_prior_is_confined_to_benchmark_namespace():
+    root = Path(__file__).resolve().parents[1]
+    allowed = {"benchmark_scaffolds.py", "rna_scaffold/benchmarking.py"}
+    paths = {
+        str(path.relative_to(root)).replace("\\", "/")
+        for path in _runtime_files(root)
+        if "RnaTrainingPrior" in path.read_text(encoding="utf-8")
+    }
+
+    assert paths == allowed

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -112,6 +114,8 @@ def inject_lora_adapters(
 class PretrainedEncoderConfig:
     kind: str = "none"
     checkpoint: str | None = None
+    expected_checkpoint_sha256: str | None = None
+    expected_checkpoint_sha256_env: str | None = "RNA_FM_EXPECTED_SHA256"
     mode: str = "frozen"
     lora_rank: int = 8
     lora_alpha: float = 16.0
@@ -131,6 +135,8 @@ class PretrainedEncoderConfig:
             raise ValueError("LoRA dropout must be in [0, 1)")
         if self.lora_last_n_layers <= 0:
             raise ValueError("LoRA last_n_layers must be positive")
+        if self.expected_checkpoint_sha256 is not None:
+            _validate_sha256(self.expected_checkpoint_sha256)
 
 
 def _import_fm():
@@ -195,7 +201,20 @@ def build_pretrained_encoder(config: PretrainedEncoderConfig | dict[str, Any] | 
     config = _coerce_config(config)
     if config.kind == "none":
         return None
+    expected_digest = _resolve_expected_checkpoint_sha256(config)
+    actual_digest = None
+    if config.checkpoint:
+        checkpoint_path = Path(config.checkpoint)
+        if checkpoint_path.is_file():
+            actual_digest = _sha256(checkpoint_path)
+            if actual_digest != expected_digest:
+                raise ValueError(
+                    "RNA-FM checkpoint SHA-256 mismatch: "
+                    f"expected={expected_digest}, actual={actual_digest}"
+                )
     encoder = load_rna_fm(config.checkpoint)
+    encoder._rna_scaffold_expected_checkpoint_sha256 = expected_digest
+    encoder._rna_scaffold_checkpoint_sha256 = actual_digest
     if config.mode == "frozen":
         encoder.requires_grad_(False)
         encoder.eval()
@@ -232,6 +251,11 @@ def pretrained_metadata(
     metadata = asdict(config)
     checkpoint = Path(config.checkpoint) if config.checkpoint else None
     metadata["checkpoint_sha256"] = _sha256(checkpoint) if checkpoint and checkpoint.is_file() else None
+    metadata["expected_checkpoint_sha256"] = (
+        getattr(encoder, "_rna_scaffold_expected_checkpoint_sha256", None)
+        if encoder is not None
+        else config.expected_checkpoint_sha256
+    )
     is_lora = config.kind == "rna_fm" and config.mode == "lora"
     metadata["lora_dropout_semantics"] = "input" if is_lora else None
     metadata["lora_projection_execution"] = "module_forward" if is_lora else None
@@ -264,3 +288,24 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _validate_sha256(value: str) -> str:
+    digest = str(value).strip().lower()
+    if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("expected RNA-FM checkpoint SHA-256 must be exactly 64 hex characters")
+    return digest
+
+
+def _resolve_expected_checkpoint_sha256(config: PretrainedEncoderConfig) -> str | None:
+    if not config.checkpoint:
+        return None
+    configured = config.expected_checkpoint_sha256
+    if configured is None and config.expected_checkpoint_sha256_env:
+        configured = os.environ.get(config.expected_checkpoint_sha256_env)
+    if configured is None:
+        raise ValueError(
+            "expected RNA-FM checkpoint SHA-256 is required; configure "
+            "expected_checkpoint_sha256 or RNA_FM_EXPECTED_SHA256"
+        )
+    return _validate_sha256(configured)

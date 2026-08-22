@@ -198,8 +198,8 @@ def test_iterative_denoise_is_reproducible_and_preserves_motif():
     assert first == second
     assert first.sequence[3:7] == "GCGG"
     assert set(first.sequence) <= set("AUCG")
-    assert first.unresolved_counts[-1] == 0
-    assert all(later < earlier for earlier, later in zip(first.unresolved_counts, first.unresolved_counts[1:]))
+    assert first.masked_counts[-1] == 0
+    assert all(later < earlier for earlier, later in zip(first.masked_counts, first.masked_counts[1:]))
     assert torch.isfinite(torch.tensor(first.normalized_log_probability))
 
 

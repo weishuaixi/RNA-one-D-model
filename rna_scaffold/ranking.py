@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from rna_scaffold.generate import ScaffoldCandidate
 from rna_scaffold.validators.rnafold import RnafoldResult
 
-
 DEFAULT_WEIGHTS = {
     "likelihood": 0.25,
     "base_entropy": 0.20,
@@ -59,7 +58,7 @@ def rank_candidates(
     weights = dict(DEFAULT_WEIGHTS if weights is None else weights)
     folds = rnafold_results or {}
     raw_rows = [_raw(candidate, folds.get(candidate.candidate_id)) for candidate in candidates]
-    normalized_rows: list[dict[str, float]] = [dict() for _ in candidates]
+    normalized_rows: list[dict[str, float]] = [{} for _ in candidates]
     for component in weights:
         available = [row[component] for row in raw_rows if row[component] is not None]
         if not available:

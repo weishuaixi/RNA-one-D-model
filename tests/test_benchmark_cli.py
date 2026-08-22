@@ -11,7 +11,8 @@ import pytest
 import yaml
 
 import benchmark_scaffolds
-from rna_scaffold.generate import CandidateGenerationAudit, RnaTrainingPrior
+from rna_scaffold.benchmarking import RnaTrainingPrior
+from rna_scaffold.generate import CandidateGenerationAudit
 from rna_scaffold.validators.rnafold import RnafoldResult
 
 
@@ -101,7 +102,7 @@ def test_benchmark_smoke_writes_reproducible_artifacts(tmp_path):
     manifest = json.loads((tmp_path / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "completed"
     assert manifest["seed"] == 42
-    assert manifest["configuration"]["candidate_count"] == 16
+    assert manifest["configuration"]["candidate_count"] == 256
     assert (
         manifest["config_sha256"] == hashlib.sha256(Path("configs/benchmark_scaffolds.yaml").read_bytes()).hexdigest()
     )
@@ -127,6 +128,7 @@ def test_benchmark_marks_configured_primary_and_hashes_training_data(tmp_path):
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 9,
                 "candidate_count": 2,
                 "bootstrap_samples": 100,
@@ -182,6 +184,7 @@ def test_benchmark_marks_configured_primary_and_hashes_training_data(tmp_path):
 def test_learned_benchmark_method_requires_checkpoint(tmp_path):
     config = tmp_path / "benchmark.yaml"
     config.write_text(
+        "fixture_mode: true\n"
         "seed: 42\n"
         "candidate_count: 2\n"
         "motifs:\n"
@@ -213,6 +216,7 @@ def test_missing_checkpoint_writes_unavailable_terminal_artifacts_without_fallba
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 42,
                 "candidate_count": 2,
                 "motifs": [{"id": "m1", "sequence": "GCGG"}],
@@ -279,6 +283,7 @@ def test_checkpoint_load_failure_writes_failed_method_status(monkeypatch, tmp_pa
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 7,
                 "candidate_count": 1,
                 "bootstrap_samples": 10,
@@ -330,6 +335,7 @@ def test_checkpoint_method_loads_once_and_reuses_loaded_model_for_all_motifs(mon
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 5,
                 "candidate_count": 1,
                 "bootstrap_samples": 10,
@@ -383,6 +389,7 @@ def test_nonempty_output_directory_fails_without_deleting_unknown_files(tmp_path
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 42,
                 "candidate_count": 1,
                 "bootstrap_samples": 10,
@@ -425,6 +432,7 @@ def test_checkpoint_shortfall_is_explicit_and_retains_rejection_reasons(monkeypa
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 5,
                 "candidate_count": 2,
                 "bootstrap_samples": 10,
@@ -494,6 +502,7 @@ def test_optional_rnafold_enrichment_records_status_and_proxy_metrics(monkeypatc
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 3,
                 "candidate_count": 1,
                 "bootstrap_samples": 10,
@@ -538,6 +547,7 @@ def test_zero_rnafold_budget_is_not_run_in_candidates_and_manifest(monkeypatch, 
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 3,
                 "candidate_count": 1,
                 "bootstrap_samples": 10,
@@ -570,6 +580,7 @@ def test_missing_rnafold_executable_is_unavailable_not_not_run(tmp_path):
     config.write_text(
         yaml.safe_dump(
             {
+                "fixture_mode": True,
                 "seed": 3,
                 "candidate_count": 1,
                 "bootstrap_samples": 10,

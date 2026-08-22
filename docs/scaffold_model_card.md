@@ -41,10 +41,11 @@ The canonical release contract uses:
 - `data/processed/rna_merged_mmseqs80.csv`
 - `outputs/mmseqs80_search/rna80_connected_components.tsv`
 
-The prepared artifact contains 1,815 canonical unique sequences assigned to
-1,185 MMseqs2 connected components at 80% identity and 80% bidirectional
-coverage. The deterministic cluster-disjoint split contains 1,513 training,
-133 validation, and 169 test records.
+The configured pre-fix expectation is 1,815 canonical unique sequences,
+1,185 eligible MMseqs2 connected components, and a 1,513/133/169 split.
+Because the legal 8-nt total-canvas boundary changed eligibility, the
+canonical server audit must re-certify these counts and fails closed on any
+mismatch; they are not claimed as newly verified local evidence.
 
 Setup rejects invalid bases, duplicate IDs, duplicate normalized sequences,
 missing or extra cluster assignments, declared cluster-size mismatches, and
@@ -66,9 +67,14 @@ Unversioned checkpoints, non-integer versions, and versions other than 2
 are rejected with an instruction to retrain. V2 does not silently convert
 or heuristically replace an incompatible checkpoint. Both CLI/config-driven
 resume paths validate this contract before `Trainer.fit`, and the Lightning
-checkpoint hook enforces the same contract during restoration.
+checkpoint hook enforces the same contract during restoration. Inference and
+preflight use `torch.load(..., weights_only=True)`. Lightning resume remains a
+trusted-only pickle path; version validation is not a sandbox for untrusted
+checkpoints.
 
-Checkpoint metadata records RNA-FM mode, local RNA-FM checkpoint SHA-256,
+RNA-FM is pinned to `rna-fm==0.2.2`; a reviewed expected weight digest must be
+provided and mismatches fail closed. Checkpoint metadata records RNA-FM mode,
+expected/actual local RNA-FM checkpoint SHA-256,
 adapter targets and hyperparameters, and total/trainable parameter counts.
 
 ## Generation controls
@@ -82,7 +88,9 @@ quota.
 
 ## Evaluation
 
-Formal comparisons use equal candidate budgets for uniform, first-order
+Formal comparisons use a deterministic, provenance-rich panel derived only
+from the held-out test split and train-only prior/nearest-neighbor references.
+They use equal candidate budgets for uniform, first-order
 Markov, second-order Markov, no-RNA-FM Transformer, frozen-RNA-FM
 Transformer, RNA-FM-LoRA Transformer, single-pass decoding, and iterative
 remasking. Checkpoint-backed methods must load real V2 checkpoints. Missing
@@ -101,8 +109,9 @@ RNAfold statuses are `ok`, `unavailable`, `timeout`, `failed`, or
 MFE, paired fraction, and motif paired fraction are plausibility proxies,
 not evidence of function.
 
-Each successful benchmark run starts from a new or empty directory and
-writes exactly:
+Each terminal benchmark run is completed and hash-validated in a sibling
+staging directory, then published with one directory rename. It starts from
+a new or empty destination and writes exactly:
 
 - `candidate_results.csv`
 - `motif_summary.csv`
@@ -120,6 +129,8 @@ writes exactly:
 - RNA-FM benefit must be shown by matched-budget ablation.
 - Outputs longer than 512 nucleotides are unsupported.
 - Experimental validation is required before biological claims.
+- Formal comparisons with fewer than the preregistered common-motif minimum
+  are labeled `exploratory_not_release_grade`.
 
 ## Release status
 

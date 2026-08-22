@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
 
+from rna_scaffold.geometry import validate_scaffold_length_limit
 from rna_scaffold.pretrained import set_lora_adapter_train_mode
 
 
@@ -83,14 +84,12 @@ class MotifDenoisingTransformer(nn.Module):
         pretrained_encoder: nn.Module | None = None,
     ) -> None:
         super().__init__()
-        if max_length < 2:
-            raise ValueError("max_length must be at least 2")
-        self.max_length = max_length
+        self.max_length = validate_scaffold_length_limit(max_length)
         self.pad_token_id = pad_token_id
         self.activation_checkpointing = activation_checkpointing
         self.pretrained_encoder = pretrained_encoder
         self.token_embedding = nn.Embedding(vocab_size, d_model, padding_idx=pad_token_id)
-        self.position_embedding = nn.Embedding(max_length, d_model)
+        self.position_embedding = nn.Embedding(self.max_length, d_model)
         self.pretrained_projection = (
             nn.Linear(int(pretrained_encoder.output_dim), d_model, bias=False)
             if pretrained_encoder is not None
@@ -108,8 +107,8 @@ class MotifDenoisingTransformer(nn.Module):
         self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers, enable_nested_tensor=False)
         self.final_norm = nn.LayerNorm(d_model)
         self.token_head = nn.Linear(d_model, 4)
-        self.left_length_head = nn.Linear(d_model, max_length + 1)
-        self.right_length_head = nn.Linear(d_model, max_length + 1)
+        self.left_length_head = nn.Linear(d_model, self.max_length + 1)
+        self.right_length_head = nn.Linear(d_model, self.max_length + 1)
 
     def train(self, mode: bool = True):
         super().train(mode)

@@ -18,7 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5"]
-rnafm = ["rna-fm"]
+rnafm = ["rna-fm==0.2.2"]
 
 [project.scripts]
 rna-train-1d = "train:main"

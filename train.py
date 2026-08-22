@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.metadata
 import inspect
+import json
+import os
+import platform
+import tempfile
+from dataclasses import asdict, is_dataclass
 from pathlib import Path
 
+import torch
 import yaml
 
 try:
@@ -17,9 +25,109 @@ except ImportError:  # pragma: no cover
 
 from rna_scaffold.checkpoints import validate_scaffold_checkpoint_version
 from rna_scaffold.datamodule import RnaScaffoldDataModule
+from rna_scaffold.geometry import validate_scaffold_length_limit
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
 from rna_scaffold.pretrained import PretrainedEncoderConfig
 from rna_scaffold.tokenizer import RnaTokenizer
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _package_version(distribution: str) -> str:
+    try:
+        return importlib.metadata.version(distribution)
+    except importlib.metadata.PackageNotFoundError:
+        return "unavailable"
+
+
+def _json_value(value):
+    return asdict(value) if is_dataclass(value) else value
+
+
+def write_training_manifest(
+    config_path: str | Path,
+    config: dict,
+    best_model_path: str | Path,
+    *,
+    pretrained_identity: dict | None = None,
+    split_manifest=None,
+    data_audit: dict | None = None,
+) -> dict:
+    """Atomically publish the hashed best-checkpoint contract consumed by benchmarks."""
+    config_path = Path(config_path)
+    checkpoint_path = Path(best_model_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"best Lightning checkpoint does not exist: {checkpoint_path}")
+    checkpoint_dir = Path(str(config["trainer"]["checkpoint_dir"]))
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = checkpoint_dir / "training_manifest.json"
+    resolved_checkpoint = checkpoint_path.resolve()
+    resolved_manifest_dir = checkpoint_dir.resolve()
+    try:
+        checkpoint_reference = resolved_checkpoint.relative_to(resolved_manifest_dir).as_posix()
+    except ValueError:
+        checkpoint_reference = str(resolved_checkpoint)
+    pretrained_config = dict(config["model"].get("pretrained") or {})
+    pretrained_kind = str(pretrained_config.get("kind", "none"))
+    identity = dict(pretrained_identity or {})
+    identity.setdefault("kind", pretrained_kind)
+    identity.setdefault(
+        "mode",
+        "none" if pretrained_kind == "none" else str(pretrained_config.get("mode", "frozen")),
+    )
+    identity["kind"] = str(identity["kind"])
+    identity["mode"] = "none" if identity["kind"] == "none" else str(identity["mode"])
+    manifest = {
+        "status": "completed",
+        "architecture_version": 2,
+        "config_path": str(config_path),
+        "config_sha256": _sha256(config_path),
+        "best_checkpoint": {
+            "path": checkpoint_reference,
+            "sha256": _sha256(checkpoint_path),
+        },
+        "method_identity": {
+            "pretrained_kind": identity["kind"],
+            "pretrained_mode": identity["mode"],
+        },
+        "pretrained_encoder": identity,
+        "split_manifest": _json_value(split_manifest),
+        "data_audit": data_audit,
+        "software_versions": {
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "lightning": _package_version("lightning"),
+            "rna_fm": _package_version("rna-fm"),
+        },
+    }
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=checkpoint_dir,
+            prefix=".training-manifest-",
+            suffix=".tmp",
+            delete=False,
+            newline="",
+        ) as handle:
+            temporary_path = Path(handle.name)
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_path, manifest_path)
+        temporary_path = None
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return manifest
 
 
 def load_config(path: str | Path) -> dict:
@@ -46,6 +154,19 @@ def validate_training_config(config: dict) -> None:
         pad_token_id=tokenizer.pad_token_id,
         **model_config,
     )
+    data_max_length = validate_scaffold_length_limit(
+        config["data"].get("max_target_length", 512),
+        field="data.max_target_length",
+    )
+    model_max_length = validate_scaffold_length_limit(
+        model_config.get("max_length", 512),
+        field="model.max_length",
+    )
+    if data_max_length > model_max_length:
+        raise ValueError(
+            "data.max_target_length must not exceed model.max_length: "
+            f"{data_max_length} > {model_max_length}"
+        )
     if not isinstance(config["trainer"].get("args"), dict):
         raise TypeError("training config trainer.args must be a mapping")
 
@@ -101,6 +222,14 @@ def main() -> None:
         **cfg["trainer"]["args"],
     )
     trainer.fit(model, datamodule=data, ckpt_path=resume)
+    write_training_manifest(
+        args.config,
+        cfg,
+        checkpoint.best_model_path,
+        pretrained_identity=model.pretrained_metadata,
+        split_manifest=data.split_manifest,
+        data_audit=data.denoising_data_audit,
+    )
 
 
 if __name__ == "__main__":
