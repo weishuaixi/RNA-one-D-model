@@ -37,7 +37,8 @@ def test_ranking_retains_raw_components_and_penalizes_low_complexity():
 
     assert ranked[0].candidate.candidate_id == "balanced"
     assert "mfe_per_nt" in ranked[0].raw_components
-    assert "base_entropy" in ranked[0].normalized_components
+    assert "base_entropy" in ranked[0].raw_components
+    assert "confidence_quality" in ranked[0].normalized_components
 
 
 def test_unavailable_rnafold_is_neutral_and_order_is_deterministic():
@@ -50,3 +51,16 @@ def test_unavailable_rnafold_is_neutral_and_order_is_deterministic():
 
     assert left == right
     assert left[0].candidate.candidate_id == "a"
+
+
+def test_without_rnafold_ranking_uses_only_sequence_metrics_and_rewards_confidence():
+    confident = _candidate("confident", "AUGCGGAU", -0.3, 0.5, 2, 0.2)
+    uncertain = _candidate("uncertain", "UUGCGGAA", -0.3, 0.5, 2, 1.8)
+
+    ranked = rank_candidates([uncertain, confident])
+
+    assert ranked[0].candidate.candidate_id == "confident"
+    assert "confidence_quality" in ranked[0].normalized_components
+    assert "mfe_quality" not in ranked[0].normalized_components
+    assert "paired_fraction" not in ranked[0].normalized_components
+    assert "motif_accessibility" not in ranked[0].normalized_components

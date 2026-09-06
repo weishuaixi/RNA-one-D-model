@@ -593,13 +593,35 @@ def _normalise_method_specs(config: dict[str, Any], smoke_test: bool) -> list[di
     return specs
 
 
-def _checkpoint_from_training_manifest(method: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+def _checkpoint_from_training_manifest(
+    method: dict[str, Any],
+    *,
+    expected_split_manifest: dict[str, Any] | None = None,
+) -> tuple[Path, dict[str, Any]]:
     manifest_path = Path(str(method["training_manifest"]))
     if not manifest_path.is_file():
         raise FileNotFoundError(f"training manifest does not exist: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("status") != "completed" or manifest.get("architecture_version") != 2:
         raise ValueError(f"training manifest is not a completed V2 run: {manifest_path}")
+    producer_config = method.get("training_config")
+    if producer_config:
+        producer_path = Path(str(producer_config))
+        if not producer_path.is_file():
+            raise FileNotFoundError(f"training producer config does not exist: {producer_path}")
+        expected_config_digest = _sha256(producer_path)
+        actual_config_digest = manifest.get("config_sha256")
+        if actual_config_digest != expected_config_digest:
+            raise ValueError(
+                "training manifest config SHA-256 mismatch: "
+                f"expected={expected_config_digest}, actual={actual_config_digest}"
+            )
+    if expected_split_manifest is not None:
+        actual_split_manifest = manifest.get("split_manifest")
+        actual_split_json = json.dumps(actual_split_manifest, sort_keys=True, separators=(",", ":"))
+        expected_split_json = json.dumps(expected_split_manifest, sort_keys=True, separators=(",", ":"))
+        if actual_split_json != expected_split_json:
+            raise ValueError("training manifest split manifest mismatch")
     best = manifest.get("best_checkpoint")
     if not isinstance(best, dict) or not best.get("path") or not best.get("sha256"):
         raise ValueError(f"training manifest best_checkpoint is incomplete: {manifest_path}")
@@ -1217,6 +1239,8 @@ def run_benchmark(
     geometry = _benchmark_geometry(config)
     method_specs = _normalise_method_specs(config, smoke_test)
     fixture_mode = bool(config.get("fixture_mode", False))
+    if not smoke_test and not fixture_mode:
+        validate_benchmark_config(config_path)
     partitions = None if smoke_test or fixture_mode else _load_benchmark_partitions(config)
     motifs, motif_panel = _resolve_motifs(
         config,
@@ -1236,7 +1260,12 @@ def run_benchmark(
             continue
         if method.get("training_manifest"):
             try:
-                checkpoint, training_manifest = _checkpoint_from_training_manifest(method)
+                checkpoint, training_manifest = _checkpoint_from_training_manifest(
+                    method,
+                    expected_split_manifest=(
+                        asdict(partitions.manifest) if partitions is not None else None
+                    ),
+                )
             except Exception as error:  # noqa: BLE001 - converted to a terminal method result below
                 method["_checkpoint_resolution_error"] = f"{type(error).__name__}: {error}"
                 method["_checkpoint_resolution_status"] = (

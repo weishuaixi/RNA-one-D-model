@@ -241,6 +241,61 @@ def test_i5_training_manifest_is_hashed_and_consumed_by_benchmark(tmp_path):
     ).hexdigest()
 
 
+def test_i5_training_manifest_rejects_stale_producer_config(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint = checkpoint_dir / "best.ckpt"
+    checkpoint.write_bytes(b"reviewed-v2-checkpoint")
+    config_path = tmp_path / "train.yaml"
+    config = {
+        "model": {"pretrained": {"kind": "none"}},
+        "trainer": {"checkpoint_dir": str(checkpoint_dir)},
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    train.write_training_manifest(config_path, config, checkpoint)
+    config_path.write_text(yaml.safe_dump({**config, "seed": 99}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="config SHA-256 mismatch"):
+        benchmark_scaffolds._checkpoint_from_training_manifest(
+            {
+                "training_manifest": str(checkpoint_dir / "training_manifest.json"),
+                "training_config": str(config_path),
+                "expected_pretrained_kind": "none",
+                "expected_pretrained_mode": "none",
+            }
+        )
+
+
+def test_i5_training_manifest_rejects_stale_split_manifest(tmp_path):
+    checkpoint_dir = tmp_path / "checkpoints"
+    checkpoint_dir.mkdir()
+    checkpoint = checkpoint_dir / "best.ckpt"
+    checkpoint.write_bytes(b"reviewed-v2-checkpoint")
+    config_path = tmp_path / "train.yaml"
+    config = {
+        "model": {"pretrained": {"kind": "none"}},
+        "trainer": {"checkpoint_dir": str(checkpoint_dir)},
+    }
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    train.write_training_manifest(
+        config_path,
+        config,
+        checkpoint,
+        split_manifest={"train_ids": ["old"]},
+    )
+
+    with pytest.raises(ValueError, match="split manifest mismatch"):
+        benchmark_scaffolds._checkpoint_from_training_manifest(
+            {
+                "training_manifest": str(checkpoint_dir / "training_manifest.json"),
+                "training_config": str(config_path),
+                "expected_pretrained_kind": "none",
+                "expected_pretrained_mode": "none",
+            },
+            expected_split_manifest={"train_ids": ["current"]},
+        )
+
+
 def test_i6_public_runtime_exposes_only_v2_generation_surface():
     forbidden = {
         "MaskedScaffoldExample",

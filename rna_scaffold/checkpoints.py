@@ -102,16 +102,41 @@ def load_scaffold_checkpoint(
         raise CheckpointCompatibilityError(f"checkpoint state_dict is incompatible: {error}") from error
     model.to(device)
     model.eval()
+    from rna_scaffold.pretrained import LoRALinear
+
+    configured = hparams.get("pretrained")
+    configured = dict(configured) if isinstance(configured, dict) else {"kind": "none"}
+    configured_kind = str(configured.get("kind", "none"))
+    configured_mode = "none" if configured_kind == "none" else str(configured.get("mode", "frozen"))
+    encoder = model.model.pretrained_encoder
+    adapters = (
+        tuple(name for name, module in encoder.named_modules() if isinstance(module, LoRALinear))
+        if encoder is not None
+        else ()
+    )
+    structure_mismatch = (
+        (configured_kind == "none" and encoder is not None)
+        or (configured_kind == "rna_fm" and encoder is None)
+        or (configured_mode == "lora" and not adapters)
+        or (configured_mode != "lora" and bool(adapters))
+    )
+    if structure_mismatch:
+        raise CheckpointCompatibilityError(
+            "checkpoint pretrained identity does not match the reconstructed model structure"
+        )
     raw_metadata = payload.get("pretrained_encoder")
     if isinstance(raw_metadata, dict):
-        pretrained = dict(raw_metadata)
-    else:
-        raw_pretrained = hparams.get("pretrained")
-        pretrained = dict(raw_pretrained) if isinstance(raw_pretrained, dict) else {"kind": "none"}
-    pretrained.setdefault("kind", "none")
-    pretrained.setdefault("mode", "frozen")
-    if pretrained["kind"] == "none":
-        pretrained["mode"] = "none"
+        metadata_kind = str(raw_metadata.get("kind", "none"))
+        metadata_mode = "none" if metadata_kind == "none" else str(raw_metadata.get("mode", "frozen"))
+        if (metadata_kind, metadata_mode) != (configured_kind, configured_mode):
+            raise CheckpointCompatibilityError(
+                "checkpoint pretrained identity mismatch between metadata and hyper_parameters"
+            )
+    pretrained = dict(model.pretrained_metadata)
+    pretrained["kind"] = configured_kind
+    pretrained["mode"] = configured_mode
+    if configured_mode == "lora":
+        pretrained["adapter_targets"] = list(adapters)
     return LoadedScaffoldModel(
         model=model,
         tokenizer=tokenizer,

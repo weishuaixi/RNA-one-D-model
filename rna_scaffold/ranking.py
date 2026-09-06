@@ -7,7 +7,7 @@ from rna_scaffold.validators.rnafold import RnafoldResult
 
 DEFAULT_WEIGHTS = {
     "likelihood": 0.25,
-    "base_entropy": 0.20,
+    "confidence_quality": 0.20,
     "gc_quality": 0.20,
     "homopolymer_quality": 0.15,
     "mfe_quality": 0.05,
@@ -35,6 +35,7 @@ def _raw(candidate: ScaffoldCandidate, fold: RnafoldResult | None) -> dict[str, 
     return {
         "likelihood": candidate.normalized_log_probability,
         "base_entropy": candidate.base_entropy,
+        "confidence_quality": 1.0 / (1.0 + max(0.0, candidate.base_entropy)),
         "gc_quality": max(0.0, 1.0 - abs(candidate.gc_fraction - 0.5) / 0.5),
         "homopolymer_quality": max(0.0, 1.0 - candidate.max_homopolymer / 8.0),
         "mfe_per_nt": mfe_per_nt,
@@ -58,8 +59,16 @@ def rank_candidates(
     weights = dict(DEFAULT_WEIGHTS if weights is None else weights)
     folds = rnafold_results or {}
     raw_rows = [_raw(candidate, folds.get(candidate.candidate_id)) for candidate in candidates]
+    active_weights = {
+        component: weight
+        for component, weight in weights.items()
+        if any(row[component] is not None for row in raw_rows)
+    }
+    total_active_weight = sum(active_weights.values())
+    if total_active_weight <= 0:
+        raise ValueError("at least one ranking component must have a positive weight and data")
     normalized_rows: list[dict[str, float]] = [{} for _ in candidates]
-    for component in weights:
+    for component in active_weights:
         available = [row[component] for row in raw_rows if row[component] is not None]
         if not available:
             for normalized in normalized_rows:
@@ -74,7 +83,7 @@ def rank_candidates(
                 normalized[component] = float((value - lower) / (upper - lower))
     scored = []
     for candidate, raw, normalized in zip(candidates, raw_rows, normalized_rows):
-        score = sum(weights[name] * normalized[name] for name in weights)
+        score = sum(active_weights[name] * normalized[name] for name in active_weights) / total_active_weight
         scored.append((score, candidate, raw, normalized, folds.get(candidate.candidate_id)))
     scored.sort(key=lambda item: (-item[0], item[1].candidate_id))
     return [

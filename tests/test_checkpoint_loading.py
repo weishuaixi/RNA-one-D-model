@@ -92,6 +92,17 @@ def test_load_scaffold_checkpoint_reconstructs_exact_model(tmp_path):
     assert loaded.tokenizer.vocab_size == RnaTokenizer().vocab_size
 
 
+def test_load_scaffold_checkpoint_rejects_forged_pretrained_metadata(tmp_path):
+    checkpoint = tmp_path / "forged-identity.ckpt"
+    _write_tiny_checkpoint(checkpoint)
+    payload = torch.load(checkpoint, weights_only=False)
+    payload["pretrained_encoder"] = {"kind": "rna_fm", "mode": "lora"}
+    torch.save(payload, checkpoint)
+
+    with pytest.raises(CheckpointCompatibilityError, match="pretrained identity mismatch"):
+        load_scaffold_checkpoint(checkpoint)
+
+
 def test_load_scaffold_checkpoint_strictly_round_trips_lora_state(monkeypatch, tmp_path):
     monkeypatch.setattr(pretrained, "load_rna_fm", lambda _: TinyRnaFmEncoder())
     hparams = _tiny_hparams()
