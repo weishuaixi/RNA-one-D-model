@@ -57,10 +57,8 @@ def test_only_supported_v2_runtime_configs_are_shipped():
     root = Path(__file__).resolve().parents[1]
 
     assert sorted(path.name for path in (root / "configs").glob("*.yaml")) == [
-        "benchmark_scaffolds.yaml",
-        "train_scaffold_a800.yaml",
-        "train_scaffold_frozen_rnafm_a800.yaml",
-        "train_scaffold_no_rnafm_a800.yaml",
+        "benchmark_scaffolds_linker_v5.yaml",
+        "train_scaffold_5090_linker_v5.yaml",
     ]
 
 
@@ -85,7 +83,12 @@ def test_runtime_sources_and_configuration_do_not_reference_v1_boundaries():
 
 def test_markov_prior_is_confined_to_benchmark_namespace():
     root = Path(__file__).resolve().parents[1]
-    allowed = {"benchmark_scaffolds.py", "rna_scaffold/benchmarking.py"}
+    allowed = {
+        "benchmark_scaffolds.py",
+        "rna_scaffold/benchmarking.py",
+        "scripts/check_linker_v5_validation.py",
+        "scripts/diagnose_linker_v5_conditioning.py",
+    }
     paths = {
         str(path.relative_to(root)).replace("\\", "/")
         for path in _runtime_files(root)

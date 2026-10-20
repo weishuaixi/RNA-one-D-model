@@ -12,7 +12,9 @@ import yaml
 
 import benchmark_scaffolds
 from rna_scaffold.benchmarking import RnaTrainingPrior
+from rna_scaffold.decoding import build_flank_pair_sampler
 from rna_scaffold.generate import CandidateGenerationAudit
+from rna_scaffold.records import RnaSequenceRecord
 from rna_scaffold.validators.rnafold import RnafoldResult
 
 
@@ -24,6 +26,46 @@ class HighestProbabilityRandom(random.Random):
     def choices(self, population, weights=None, *, cum_weights=None, k=1):
         assert weights is not None and cum_weights is None and k == 1
         return [population[max(range(len(weights)), key=weights.__getitem__)]]
+
+
+def test_candidate_metrics_measure_linker_without_the_fixed_motif():
+    metric = benchmark_scaffolds._candidate_metric(
+        motif_id="m1",
+        motif="GCGG",
+        sequence="AAAAGCGGCCCC",
+        start=4,
+        training_sequences=[],
+        normalized_edit_diversity=0.0,
+        kmer_diversity=0.0,
+        runtime_seconds=0.0,
+        peak_cuda_memory_bytes=None,
+        failure=None,
+        rejection_reason=None,
+        rnafold=None,
+        geometry=benchmark_scaffolds.BenchmarkGeometry(),
+    )
+
+    assert metric.linker_length == 8
+    assert metric.linker_gc_fraction == pytest.approx(0.5)
+    assert metric.linker_composition_entropy_bits == pytest.approx(1.0)
+    assert metric.linker_max_homopolymer_run == 4
+
+    same_base_arms = benchmark_scaffolds._candidate_metric(
+        motif_id="m1",
+        motif="GCGG",
+        sequence="AAAAGCGGAAAA",
+        start=4,
+        training_sequences=[],
+        normalized_edit_diversity=0.0,
+        kmer_diversity=0.0,
+        runtime_seconds=0.0,
+        peak_cuda_memory_bytes=None,
+        failure=None,
+        rejection_reason=None,
+        rnafold=None,
+        geometry=benchmark_scaffolds.BenchmarkGeometry(),
+    )
+    assert same_base_arms.linker_max_homopolymer_run == 4
 
 
 def test_markov2_benchmark_conditions_both_motif_junctions():
@@ -41,13 +83,130 @@ def test_markov2_benchmark_conditions_both_motif_junctions():
     assert sequence == "AAGCGGUU"
 
 
+def test_v4_asymmetric_geometry_applies_to_uniform_markov_and_panel_sources():
+    geometry = benchmark_scaffolds.BenchmarkGeometry(
+        min_flank_length=10,
+        min_total_scaffold_length=29,
+        preferred_total_scaffold_length=40,
+        max_length=100,
+        short_flank_min=10,
+        short_flank_max=20,
+        long_flank_min=15,
+        long_flank_max=30,
+    )
+    prior = RnaTrainingPrior.from_sequences(["AUGC" * 25])
+
+    generated = [
+        benchmark_scaffolds._uniform("GCGG", 40, random.Random(1), geometry),
+        benchmark_scaffolds._markov("GCGG", 40, prior, random.Random(1), order=2, geometry=geometry),
+    ]
+    for sequence, start in generated:
+        assert len(sequence) == 40
+        assert benchmark_scaffolds._matches_asymmetric_flank_ranges(
+            start,
+            len(sequence) - start - 4,
+            geometry,
+        )
+
+    panel = benchmark_scaffolds.build_held_out_motif_panel(
+        [RnaSequenceRecord("held_out", "AUGC" * 25, None, "unit")],
+        panel_size=1,
+        seed=3,
+        motif_lengths=(4,),
+        min_flank_length=10,
+        geometry=geometry,
+    )
+    source_start = panel[0]["source_start"]
+    right_available = panel[0]["source_length"] - source_start - 4
+    assert any(
+        benchmark_scaffolds._matches_asymmetric_flank_ranges(left, right, geometry)
+        and left <= source_start
+        and right <= right_available
+        for left in range(10, 31)
+        for right in range(10, 31)
+    )
+
+
+def test_asymmetric_baselines_and_checkpoint_use_the_same_uniform_pair_support():
+    geometry = benchmark_scaffolds.BenchmarkGeometry(
+        min_flank_length=1,
+        min_total_scaffold_length=4,
+        preferred_total_scaffold_length=4,
+        max_length=8,
+        short_flank_min=1,
+        short_flank_max=2,
+        long_flank_min=2,
+        long_flank_max=3,
+    )
+    expected = set(benchmark_scaffolds._legal_benchmark_flank_pairs(2, geometry))
+    prior = RnaTrainingPrior.from_sequences(["AUGCAUGC"])
+
+    for kind in ("uniform", "markov1", "markov2"):
+        generated, rejected, _ = benchmark_scaffolds._generate_method_motif(
+            {"kind": kind},
+            motif="GC",
+            length=4,
+            budget=len(expected),
+            seed=11,
+            prior=prior,
+            geometry=geometry,
+        )
+        actual = {(row["motif_start"], len(row["sequence"]) - row["motif_start"] - 2) for row in generated}
+        assert actual == expected
+        assert rejected == {}
+
+    checkpoint_sampler = build_flank_pair_sampler(
+        None,
+        motif_length=2,
+        max_length=8,
+        min_scaffold_length=4,
+        min_flank_length=1,
+        short_flank_range=(1, 2),
+        long_flank_range=(2, 3),
+        length_sampling="uniform",
+        model_max_length=8,
+        device="cpu",
+    )
+    assert {tuple(pair) for pair in checkpoint_sampler.pairs.tolist()} == expected
+
+
+def test_v5_benchmark_recipe_validates_shared_linker_contract():
+    audit = benchmark_scaffolds.validate_benchmark_config(Path("configs/benchmark_scaffolds_linker_v5.yaml"))
+
+    assert audit["status"] == "validated_external_inputs_pending"
+    assert audit["geometry"] == {
+        "min_flank_length": 10,
+        "min_total_scaffold_length": 29,
+        "preferred_total_scaffold_length": 40,
+        "max_length": 100,
+        "short_flank_min": 10,
+        "short_flank_max": 20,
+        "long_flank_min": 15,
+        "long_flank_max": 30,
+    }
+    assert audit["methods"][-1] == "transformer_linker_v5"
+    config = yaml.safe_load(Path("configs/benchmark_scaffolds_linker_v5.yaml").read_text(encoding="utf-8"))
+    learned_generation = config["methods"][-1]["generation"]
+    assert (
+        not {
+            "min_normalized_edit_distance",
+            "max_kmer_similarity",
+            "max_homopolymer_run",
+            "gc_min",
+            "gc_max",
+            "enforce_gc_bounds",
+        }
+        & learned_generation.keys()
+    )
+
+
 def test_benchmark_smoke_writes_reproducible_artifacts(tmp_path):
     completed = subprocess.run(
         [
             sys.executable,
             "benchmark_scaffolds.py",
             "--config",
-            "configs/benchmark_scaffolds.yaml",
+            "configs/benchmark_scaffolds_linker_v5.yaml",
             "--smoke-test",
             "--output-dir",
             str(tmp_path),
@@ -81,7 +240,7 @@ def test_benchmark_smoke_writes_reproducible_artifacts(tmp_path):
             for candidate in candidates
         )
         for row in candidates
-    } == {(method, motif): 4 for method in ("uniform", "markov1", "markov2") for motif in ("motif_gugg", "motif_augg")}
+    } == {(method, motif): 4 for method in ("uniform", "markov1", "markov2") for motif in ("motif_gcgg", "motif_augcga")}
     assert {
         "normalized_edit_diversity",
         "kmer_diversity",
@@ -97,14 +256,14 @@ def test_benchmark_smoke_writes_reproducible_artifacts(tmp_path):
 
     paired = json.loads((tmp_path / "paired_bootstrap.json").read_text(encoding="utf-8"))
     assert paired["comparisons"]
-    assert all(comparison["common_motif_ids"] == ["motif_augg", "motif_gugg"] for comparison in paired["comparisons"])
+    assert all(comparison["common_motif_ids"] == ["motif_augcga", "motif_gcgg"] for comparison in paired["comparisons"])
 
     manifest = json.loads((tmp_path / "run_manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "completed"
     assert manifest["seed"] == 42
     assert manifest["configuration"]["candidate_count"] == 256
     assert (
-        manifest["config_sha256"] == hashlib.sha256(Path("configs/benchmark_scaffolds.yaml").read_bytes()).hexdigest()
+        manifest["config_sha256"] == hashlib.sha256(Path("configs/benchmark_scaffolds_linker_v5.yaml").read_bytes()).hexdigest()
     )
     assert manifest["command"][-3:] == ["--output-dir", str(tmp_path), "--smoke-test"] or manifest["command"][-3:] == [
         "--smoke-test",

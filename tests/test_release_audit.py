@@ -63,10 +63,8 @@ def test_release_audit_records_truthful_check_states(tmp_path):
     assert schemas is not None
     assert schemas["status"] == "passed"
     assert schemas["validated"] == [
-        "configs/benchmark_scaffolds.yaml",
-        "configs/train_scaffold_a800.yaml",
-        "configs/train_scaffold_frozen_rnafm_a800.yaml",
-        "configs/train_scaffold_no_rnafm_a800.yaml",
+        "configs/benchmark_scaffolds_linker_v5.yaml",
+        "configs/train_scaffold_5090_linker_v5.yaml",
     ]
     assert audit["server_training"]["status"] == "not_run"
     assert audit["formal_benchmark"]["status"] == "not_run"

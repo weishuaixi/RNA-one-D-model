@@ -7,7 +7,7 @@ from torch import nn
 from rna_scaffold import pretrained
 from rna_scaffold.checkpoints import CheckpointCompatibilityError, load_scaffold_checkpoint
 from rna_scaffold.lightning_module import RnaScaffoldLitModule
-from rna_scaffold.pretrained import LoRALinear
+from rna_scaffold.pretrained import LoRALinear, TrustedRnaFmCheckpoint
 from rna_scaffold.tokenizer import RnaTokenizer
 
 
@@ -105,9 +105,14 @@ def test_load_scaffold_checkpoint_rejects_forged_pretrained_metadata(tmp_path):
 
 def test_load_scaffold_checkpoint_strictly_round_trips_lora_state(monkeypatch, tmp_path):
     monkeypatch.setattr(pretrained, "load_rna_fm", lambda _: TinyRnaFmEncoder())
+    rna_fm_checkpoint = tmp_path / "custom-rna-fm.pth"
+    rna_fm_checkpoint.write_bytes(b"explicitly trusted test RNA-FM checkpoint")
+    rna_fm_sha256 = hashlib.sha256(rna_fm_checkpoint.read_bytes()).hexdigest()
     hparams = _tiny_hparams()
     hparams["pretrained"] = {
         "kind": "rna_fm",
+        "checkpoint": str(rna_fm_checkpoint),
+        "expected_checkpoint_sha256": rna_fm_sha256,
         "mode": "lora",
         "lora_rank": 2,
         "lora_alpha": 4.0,
@@ -135,7 +140,13 @@ def test_load_scaffold_checkpoint_strictly_round_trips_lora_state(monkeypatch, t
         checkpoint,
     )
 
-    loaded = load_scaffold_checkpoint(checkpoint)
+    loaded = load_scaffold_checkpoint(
+        checkpoint,
+        trusted_rna_fm_checkpoint=TrustedRnaFmCheckpoint(
+            rna_fm_checkpoint,
+            rna_fm_sha256,
+        ),
+    )
 
     loaded_encoder = loaded.model.model.pretrained_encoder
     assert loaded_encoder._rna_scaffold_lora_targets == (
@@ -148,6 +159,91 @@ def test_load_scaffold_checkpoint_strictly_round_trips_lora_state(monkeypatch, t
     assert expected_adapter_state
     for name, expected in expected_adapter_state.items():
         torch.testing.assert_close(loaded_state[name], expected)
+
+
+def test_scaffold_payload_cannot_authorize_an_arbitrary_rna_fm_pickle(
+    monkeypatch,
+    tmp_path,
+):
+    malicious_rna_fm = tmp_path / "payload-controlled.pth"
+    malicious_rna_fm.write_bytes(b"not an authorized RNA-FM release")
+    payload_digest = hashlib.sha256(malicious_rna_fm.read_bytes()).hexdigest()
+    hparams = _tiny_hparams()
+    hparams["pretrained"] = {
+        "kind": "rna_fm",
+        "checkpoint": str(malicious_rna_fm),
+        "expected_checkpoint_sha256": payload_digest,
+        "mode": "frozen",
+    }
+    checkpoint = tmp_path / "payload-controlled.ckpt"
+    torch.save(
+        {
+            "architecture_version": 2,
+            "state_dict": {},
+            "hyper_parameters": hparams,
+            "pretrained_encoder": {
+                "kind": "rna_fm",
+                "mode": "frozen",
+                "checkpoint_sha256": payload_digest,
+            },
+        },
+        checkpoint,
+    )
+    loader_called = False
+
+    def fail_if_loaded(_):
+        nonlocal loader_called
+        loader_called = True
+        raise AssertionError("untrusted RNA-FM pickle must not be loaded")
+
+    monkeypatch.setattr(pretrained, "load_rna_fm", fail_if_loaded)
+
+    with pytest.raises(CheckpointCompatibilityError, match="controlled cache path"):
+        load_scaffold_checkpoint(checkpoint)
+
+    assert loader_called is False
+
+
+def test_explicit_rna_fm_trust_must_match_payload_identity(monkeypatch, tmp_path):
+    trusted_path = tmp_path / "trusted-rna-fm.pth"
+    trusted_path.write_bytes(b"caller-reviewed RNA-FM checkpoint")
+    trusted_digest = hashlib.sha256(trusted_path.read_bytes()).hexdigest()
+    payload_digest = hashlib.sha256(b"different checkpoint").hexdigest()
+    hparams = _tiny_hparams()
+    hparams["pretrained"] = {
+        "kind": "rna_fm",
+        "checkpoint": str(trusted_path),
+        "expected_checkpoint_sha256": payload_digest,
+        "mode": "frozen",
+    }
+    checkpoint = tmp_path / "identity-mismatch.ckpt"
+    torch.save(
+        {
+            "architecture_version": 2,
+            "state_dict": {},
+            "hyper_parameters": hparams,
+        },
+        checkpoint,
+    )
+    loader_called = False
+
+    def fail_if_loaded(_):
+        nonlocal loader_called
+        loader_called = True
+        raise AssertionError("identity mismatch must be rejected before loading")
+
+    monkeypatch.setattr(pretrained, "load_rna_fm", fail_if_loaded)
+
+    with pytest.raises(CheckpointCompatibilityError, match="caller-authorized digest"):
+        load_scaffold_checkpoint(
+            checkpoint,
+            trusted_rna_fm_checkpoint=TrustedRnaFmCheckpoint(
+                trusted_path,
+                trusted_digest,
+            ),
+        )
+
+    assert loader_called is False
 
 
 def test_lightning_checkpoint_metadata_declares_v2_architecture():

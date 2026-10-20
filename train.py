@@ -17,11 +17,11 @@ import yaml
 try:
     import lightning.pytorch as L
     from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
-    from lightning.pytorch.loggers import WandbLogger
+    from lightning.pytorch.loggers import CSVLogger, WandbLogger
 except ImportError:  # pragma: no cover
     import pytorch_lightning as L
     from pytorch_lightning.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
-    from pytorch_lightning.loggers import WandbLogger
+    from pytorch_lightning.loggers import CSVLogger, WandbLogger
 
 from rna_scaffold.checkpoints import validate_scaffold_checkpoint_version
 from rna_scaffold.datamodule import RnaScaffoldDataModule
@@ -149,11 +149,52 @@ def validate_training_config(config: dict) -> None:
     if "freeze" in pretrained_config:
         raise ValueError("pretrained.freeze was removed in V2; use pretrained.mode")
     PretrainedEncoderConfig(**pretrained_config)
+    model_config.setdefault("mask_token_id", tokenizer.token_to_id[tokenizer.special.mask])
+    if model_config.get("generation_remask_strategy", "confidence") not in {"confidence", "random"}:
+        raise ValueError("model.generation_remask_strategy must be confidence or random")
     inspect.signature(RnaScaffoldLitModule).bind(
         vocab_size=tokenizer.vocab_size,
         pad_token_id=tokenizer.pad_token_id,
         **model_config,
     )
+    self_conditioning_probability = float(model_config.get("self_conditioning_probability", 0.0))
+    if not 0 <= self_conditioning_probability <= 1:
+        raise ValueError("model.self_conditioning_probability must be in [0, 1]")
+    if self_conditioning_probability > 0 and not bool(model_config.get("use_conditioning_embeddings", False)):
+        raise ValueError("model self-conditioning requires use_conditioning_embeddings=true")
+    conditioning_clip = int(model_config.get("conditioning_relative_distance_clip", 32))
+    if conditioning_clip < 1:
+        raise ValueError("model.conditioning_relative_distance_clip must be positive")
+    pretrained_fusion = str(model_config.get("pretrained_fusion", "add"))
+    if pretrained_fusion not in {"add", "gated"}:
+        raise ValueError("model.pretrained_fusion must be 'add' or 'gated'")
+    length_pooling = str(model_config.get("length_pooling", "mean"))
+    if length_pooling not in {"mean", "attention"}:
+        raise ValueError("model.length_pooling must be 'mean' or 'attention'")
+    predicts_lengths = bool(model_config.get("predict_flank_lengths", True))
+    left_length_weight = float(model_config.get("left_length_loss_weight", 0.25))
+    right_length_weight = float(model_config.get("right_length_loss_weight", 0.25))
+    if not predicts_lengths and (left_length_weight > 0 or right_length_weight > 0):
+        raise ValueError("model length loss weights must be zero when predict_flank_lengths=false")
+    if pretrained_fusion == "gated" and pretrained_config.get("kind", "none") == "none":
+        raise ValueError("model.pretrained_fusion='gated' requires a pretrained encoder")
+    model_denoise_steps = int(model_config.get("denoise_steps", 16))
+    if model_denoise_steps < 1:
+        raise ValueError("model.denoise_steps must be positive")
+    iterative_mask_steps = config["data"].get("iterative_mask_steps")
+    if iterative_mask_steps is not None and int(iterative_mask_steps) != model_denoise_steps:
+        raise ValueError(
+            "data.iterative_mask_steps must equal model.denoise_steps: "
+            f"{int(iterative_mask_steps)} != {model_denoise_steps}"
+        )
+    if float(model_config.get("composition_loss_weight", 0.0)) < 0:
+        raise ValueError("model.composition_loss_weight must be non-negative")
+    if float(model_config.get("homopolymer_loss_weight", 0.0)) < 0:
+        raise ValueError("model.homopolymer_loss_weight must be non-negative")
+    if int(model_config.get("homopolymer_max_run", 6)) < 1:
+        raise ValueError("model.homopolymer_max_run must be positive")
+    if float(model_config.get("lora_lr_multiplier", 1.0)) <= 0:
+        raise ValueError("model.lora_lr_multiplier must be positive")
     data_max_length = validate_scaffold_length_limit(
         config["data"].get("max_target_length", 512),
         field="data.max_target_length",
@@ -164,8 +205,7 @@ def validate_training_config(config: dict) -> None:
     )
     if data_max_length > model_max_length:
         raise ValueError(
-            "data.max_target_length must not exceed model.max_length: "
-            f"{data_max_length} > {model_max_length}"
+            f"data.max_target_length must not exceed model.max_length: {data_max_length} > {model_max_length}"
         )
     if not isinstance(config["trainer"].get("args"), dict):
         raise TypeError("training config trainer.args must be a mapping")
@@ -173,7 +213,7 @@ def validate_training_config(config: dict) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train RNA motif-conditioned scaffold model.")
-    parser.add_argument("--config", default="configs/train_scaffold_a800.yaml")
+    parser.add_argument("--config", default="configs/train_scaffold_5090_linker_v5.yaml")
     parser.add_argument("--resume", help="Resume from an existing Lightning checkpoint.")
     args = parser.parse_args()
 
@@ -186,23 +226,26 @@ def main() -> None:
 
     tokenizer = RnaTokenizer()
     data = RnaScaffoldDataModule(tokenizer=tokenizer, **cfg["data"])
+    model_config = dict(cfg["model"])
+    model_config.setdefault("mask_token_id", tokenizer.token_to_id[tokenizer.special.mask])
     model = RnaScaffoldLitModule(
         vocab_size=tokenizer.vocab_size,
         pad_token_id=tokenizer.pad_token_id,
-        **cfg["model"],
+        **model_config,
     )
 
+    monitor_metric = str(cfg["trainer"].get("monitor", "val/loss"))
     checkpoint = ModelCheckpoint(
         dirpath=cfg["trainer"].get("checkpoint_dir", "checkpoints"),
-        filename="rna-scaffold-{epoch:02d}-{val/loss:.4f}",
-        monitor="val/loss",
+        filename=cfg["trainer"].get("checkpoint_filename", "rna-scaffold-{epoch:02d}-{val/loss:.4f}"),
+        monitor=monitor_metric,
         mode="min",
         save_top_k=3,
         save_last=True,
         auto_insert_metric_name=False,
     )
     early_stopping = EarlyStopping(
-        monitor="val/loss",
+        monitor=monitor_metric,
         mode="min",
         patience=int(cfg["trainer"].get("early_stopping_patience", 12)),
         check_finite=True,
@@ -217,7 +260,7 @@ def main() -> None:
     )
 
     trainer = L.Trainer(
-        logger=logger,
+        logger=[logger, CSVLogger(save_dir=cfg["trainer"].get("checkpoint_dir", "checkpoints"), name="metrics")],
         callbacks=[checkpoint, early_stopping, lr_monitor],
         **cfg["trainer"]["args"],
     )

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import warnings
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,106 @@ import torch
 from torch import nn
 
 _SUPPORTED_ATTENTION_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "out_proj")
+RNA_FM_CHECKPOINT_FILENAME = "RNA-FM_pretrained.pth"
+OFFICIAL_RNA_FM_SHA256 = "5b5d7d87b37c291ef42c140ef9edf7aea29f255fa2a4fd435f776c52e93d5e99"
+OFFICIAL_RNA_FM_SHA256_ALLOWLIST = frozenset({OFFICIAL_RNA_FM_SHA256})
+
+
+@dataclass(frozen=True)
+class TrustedRnaFmCheckpoint:
+    """Caller-authorized RNA-FM pickle identity.
+
+    This value must be supplied through a loader API; it must never be created
+    from fields inside the scaffold checkpoint being loaded.
+    """
+
+    path: Path | str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "path", Path(self.path).expanduser().resolve())
+        object.__setattr__(self, "sha256", _validate_sha256(self.sha256))
+
+
+def default_rna_fm_checkpoint_paths() -> tuple[Path, ...]:
+    """Return process-controlled locations for the official RNA-FM release."""
+
+    project_cache = (
+        Path(__file__).resolve().parents[1] / ".cache" / "torch" / "hub" / "checkpoints" / RNA_FM_CHECKPOINT_FILENAME
+    ).resolve()
+    torch_hub_cache = (Path(torch.hub.get_dir()) / "checkpoints" / RNA_FM_CHECKPOINT_FILENAME).resolve()
+    return tuple(dict.fromkeys((project_cache, torch_hub_cache)))
+
+
+def authorize_scaffold_rna_fm_config(
+    config: dict[str, Any],
+    metadata: dict[str, Any] | None,
+    *,
+    trusted_checkpoint: TrustedRnaFmCheckpoint | None = None,
+) -> dict[str, Any]:
+    """Replace payload-controlled RNA-FM trust fields with an authorized identity.
+
+    A scaffold checkpoint may describe the pretrained model it used, but that
+    description cannot authorize a legacy pickle load. By default only the
+    official release digest at a process-controlled cache path is accepted.
+    Callers may explicitly authorize another exact path and digest.
+    """
+
+    if trusted_checkpoint is not None and not isinstance(
+        trusted_checkpoint,
+        TrustedRnaFmCheckpoint,
+    ):
+        raise TypeError("trusted_checkpoint must be a TrustedRnaFmCheckpoint")
+    sanitized = dict(config)
+    if str(sanitized.get("kind", "none")) != "rna_fm":
+        if trusted_checkpoint is not None:
+            raise ValueError("trusted RNA-FM checkpoint was supplied for a model without RNA-FM")
+        return sanitized
+
+    default_paths = default_rna_fm_checkpoint_paths()
+    declared_path_value = sanitized.get("checkpoint")
+    if trusted_checkpoint is None:
+        trusted_digest = OFFICIAL_RNA_FM_SHA256
+        if not declared_path_value:
+            raise ValueError("RNA-FM scaffold checkpoint must declare a local checkpoint path")
+        declared_path = Path(str(declared_path_value)).expanduser()
+        project_relative = Path(".cache/torch/hub/checkpoints") / RNA_FM_CHECKPOINT_FILENAME
+        if not declared_path.is_absolute() and declared_path.as_posix() == project_relative.as_posix():
+            resolved_path = default_paths[0]
+        else:
+            resolved_path = declared_path.resolve()
+        if resolved_path not in default_paths:
+            allowed = ", ".join(str(path) for path in default_paths)
+            raise ValueError(
+                f"RNA-FM path embedded in scaffold checkpoint is not a controlled cache path; allowed={allowed}"
+            )
+    else:
+        resolved_path = Path(trusted_checkpoint.path)
+        trusted_digest = trusted_checkpoint.sha256
+
+    if trusted_checkpoint is None and trusted_digest not in OFFICIAL_RNA_FM_SHA256_ALLOWLIST:
+        raise ValueError("RNA-FM digest is not in the official checkpoint allowlist")
+
+    declared_digests: list[tuple[str, str]] = []
+    configured_digest = sanitized.get("expected_checkpoint_sha256")
+    if configured_digest is not None:
+        declared_digests.append(("hyper_parameters", _validate_sha256(configured_digest)))
+    if isinstance(metadata, dict):
+        for key in ("expected_checkpoint_sha256", "checkpoint_sha256"):
+            value = metadata.get(key)
+            if value is not None:
+                declared_digests.append((f"pretrained_encoder.{key}", _validate_sha256(value)))
+    mismatches = [f"{source}={digest}" for source, digest in declared_digests if digest != trusted_digest]
+    if mismatches:
+        raise ValueError(
+            "RNA-FM identity in scaffold checkpoint does not match the caller-authorized digest: "
+            + ", ".join(mismatches)
+        )
+
+    sanitized["checkpoint"] = str(resolved_path)
+    sanitized["expected_checkpoint_sha256"] = trusted_digest
+    sanitized["expected_checkpoint_sha256_env"] = None
+    return sanitized
 
 
 class LoRALinear(nn.Module):
@@ -93,8 +195,7 @@ def inject_lora_adapters(
         candidates = [name for name, module in model.named_modules() if name and not list(module.children())]
         candidate_text = ", ".join(candidates) if candidates else "<none>"
         raise ValueError(
-            "no supported RNA-FM attention projections were found; "
-            f"candidate module names: {candidate_text}"
+            f"no supported RNA-FM attention projections were found; candidate module names: {candidate_text}"
         )
 
     injected_names: list[str] = []
@@ -182,7 +283,30 @@ class RnaFmEncoder(nn.Module):
         return results["representations"][self.representation_layer][:, 1 : length + 1]
 
 
-def load_rna_fm(checkpoint: str | None) -> nn.Module:
+@contextmanager
+def _trusted_legacy_checkpoint_loading(enabled: bool):
+    """Bridge PyTorch >=2.6 for a hash-verified legacy RNA-FM pickle only."""
+    variable = "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"
+    previous = os.environ.get(variable)
+    if enabled:
+        os.environ[variable] = "1"
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Environment variable TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD detected.*",
+                category=UserWarning,
+            )
+            yield
+    finally:
+        if enabled:
+            if previous is None:
+                os.environ.pop(variable, None)
+            else:
+                os.environ[variable] = previous
+
+
+def load_rna_fm(checkpoint: str | None, *, trusted_local_checkpoint: bool = False) -> nn.Module:
     try:
         fm = _import_fm()
     except ImportError as error:
@@ -191,7 +315,11 @@ def load_rna_fm(checkpoint: str | None) -> nn.Module:
             "`pip install rna-fm`, or set pretrained.kind to 'none'."
         ) from error
     if checkpoint:
-        model, alphabet = fm.pretrained.load_model_and_alphabet_local(Path(checkpoint))
+        with _trusted_legacy_checkpoint_loading(trusted_local_checkpoint):
+            model, alphabet = fm.pretrained.load_model_and_alphabet_local(
+                Path(checkpoint),
+                theme="rna",
+            )
     else:
         model, alphabet = fm.pretrained.rna_fm_t12()
     return RnaFmEncoder(model, alphabet)
@@ -209,10 +337,10 @@ def build_pretrained_encoder(config: PretrainedEncoderConfig | dict[str, Any] | 
             actual_digest = _sha256(checkpoint_path)
             if actual_digest != expected_digest:
                 raise ValueError(
-                    "RNA-FM checkpoint SHA-256 mismatch: "
-                    f"expected={expected_digest}, actual={actual_digest}"
+                    f"RNA-FM checkpoint SHA-256 mismatch: expected={expected_digest}, actual={actual_digest}"
                 )
-    encoder = load_rna_fm(config.checkpoint)
+    with _trusted_legacy_checkpoint_loading(bool(config.checkpoint and actual_digest == expected_digest)):
+        encoder = load_rna_fm(config.checkpoint)
     encoder._rna_scaffold_expected_checkpoint_sha256 = expected_digest
     encoder._rna_scaffold_checkpoint_sha256 = actual_digest
     if config.mode == "frozen":

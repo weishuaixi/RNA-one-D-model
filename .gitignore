@@ -3,7 +3,16 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .venv*/
+.inference_env/
+.rnafold_env/
 .superpowers/
+.codex_tmp/
+.cache/
+.ruff_cache/
+.vscode/
+.env
+.env.*
+!.env.example
 
 wandb/
 logs/
@@ -12,9 +21,35 @@ checkpoints_3d/
 *.ckpt
 *.pt
 outputs/
+project_artifacts/
+DELETE_ME/
+exports/
+checkpoints_*/
+*.pth
+*.tar.gz
+*.tar.gz.sha256
+*.zip
+environment-installed.txt
+PACKAGE_SHA256SUMS
 
 data/*.fasta
 data/*.fa
 data/*.fna
 data/pdbs/
+data/processed/
 !data/.gitkeep
+
+# Explicit final-release assets only; other weights and caches remain ignored.
+!checkpoints_scaffold_linker_v5/
+checkpoints_scaffold_linker_v5/*
+!checkpoints_scaffold_linker_v5/rna-linker-v5-34-1.3714.ckpt
+!checkpoints_scaffold_linker_v5/training_manifest.json
+!/.cache/
+/.cache/*
+!/.cache/torch/
+/.cache/torch/*
+!/.cache/torch/hub/
+/.cache/torch/hub/*
+!/.cache/torch/hub/checkpoints/
+/.cache/torch/hub/checkpoints/*
+!/.cache/torch/hub/checkpoints/RNA-FM_pretrained.pth

@@ -81,7 +81,7 @@ def test_i2_all_runtime_boundaries_reject_513(factory):
 
 
 def test_i2_training_config_cross_validates_data_and_model_lengths():
-    config = yaml.safe_load(Path("configs/train_scaffold_a800.yaml").read_text(encoding="utf-8"))
+    config = yaml.safe_load(Path("configs/train_scaffold_5090_linker_v5.yaml").read_text(encoding="utf-8"))
     config["data"]["max_target_length"] = 512
     config["model"]["max_length"] = 511
 
@@ -191,25 +191,12 @@ def test_i4_identity_mismatch_publishes_failed_terminal_manifest(monkeypatch, tm
     assert manifest["methods"][0]["actual_identity"]["pretrained_kind"] == "rna_fm"
 
 
-def test_i5_three_matched_training_configs_and_manifest_producers_exist():
-    expected = {
-        "train_scaffold_no_rnafm_a800.yaml",
-        "train_scaffold_frozen_rnafm_a800.yaml",
-        "train_scaffold_a800.yaml",
-    }
-    paths = {path.name for path in Path("configs").glob("train_scaffold*_a800.yaml")}
-
-    assert expected <= paths
+def test_i5_final_training_and_matched_baselines_exist():
     assert hasattr(train, "write_training_manifest")
-    configs = {
-        name: yaml.safe_load((Path("configs") / name).read_text(encoding="utf-8"))
-        for name in expected
-    }
-    reference = configs["train_scaffold_a800.yaml"]
-    assert all(config["data"] == reference["data"] for config in configs.values())
-    assert all(config["trainer"]["args"] == reference["trainer"]["args"] for config in configs.values())
-    assert len({config["trainer"]["checkpoint_dir"] for config in configs.values()}) == 3
-    assert len({config["wandb"]["name"] for config in configs.values()}) == 3
+    config = yaml.safe_load(Path("configs/benchmark_scaffolds_linker_v5.yaml").read_text(encoding="utf-8"))
+    assert config["training_config"] == "configs/train_scaffold_5090_linker_v5.yaml"
+    assert [method["kind"] for method in config["methods"]] == ["uniform", "markov1", "markov2", "checkpoint"]
+    assert config["methods"][-1]["primary"] is True
 
 
 def test_i5_training_manifest_is_hashed_and_consumed_by_benchmark(tmp_path):
@@ -508,7 +495,7 @@ def test_formal_config_dry_run_validates_without_claiming_external_evidence():
     validator = getattr(benchmark_scaffolds, "validate_benchmark_config", None)
 
     assert validator is not None
-    audit = validator(Path("configs/benchmark_scaffolds.yaml"))
+    audit = validator(Path("configs/benchmark_scaffolds_linker_v5.yaml"))
     assert audit["status"] == "validated_external_inputs_pending"
     assert audit["motif_panel"]["source_partition"] == "test"
     assert audit["scientific_release_status"] == "not_run"

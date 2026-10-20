@@ -16,6 +16,8 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 _REMOVED_RUNTIME_TERMS = (
     "position" + "_logits",
@@ -40,9 +42,7 @@ _REMOVED_RUNTIME_TERMS = (
     "flank_" + "scaffold",
     "masked_" + "scaffold",
 )
-_REMOVED_FALLBACK_PATTERN = re.compile(
-    "(?i)(?:v" + "1.{0,40}fallback|fallback.{0,40}v" + "1)"
-)
+_REMOVED_FALLBACK_PATTERN = re.compile("(?i)(?:v" + "1.{0,40}fallback|fallback.{0,40}v" + "1)")
 
 
 def _run(name: str, command: list[str]) -> dict:
@@ -88,7 +88,7 @@ def _audit_v2_runtime_boundary(root: Path = ROOT) -> dict:
         if matched:
             violations.append(
                 {
-                    "path": str(path.relative_to(root)),
+                    "path": path.relative_to(root).as_posix(),
                     "terms": matched,
                 }
             )
@@ -96,6 +96,8 @@ def _audit_v2_runtime_boundary(root: Path = ROOT) -> dict:
     allowed_prior_paths = {
         "benchmark_scaffolds.py",
         "rna_scaffold/benchmarking.py",
+        "scripts/check_linker_v5_validation.py",
+        "scripts/diagnose_linker_v5_conditioning.py",
     }
     for path in _runtime_files(root):
         relative = str(path.relative_to(root)).replace("\\", "/")
@@ -109,9 +111,7 @@ def _audit_v2_runtime_boundary(root: Path = ROOT) -> dict:
     import rna_scaffold
 
     public_forbidden = [
-        symbol
-        for symbol in _REMOVED_RUNTIME_TERMS
-        if symbol.isidentifier() and hasattr(rna_scaffold, symbol)
+        symbol for symbol in _REMOVED_RUNTIME_TERMS if symbol.isidentifier() and hasattr(rna_scaffold, symbol)
     ]
     if public_forbidden:
         violations.append({"path": "rna_scaffold/__init__.py", "terms": public_forbidden})
@@ -124,10 +124,8 @@ def _audit_v2_runtime_boundary(root: Path = ROOT) -> dict:
 
 def _audit_v2_configuration_schemas(root: Path = ROOT) -> dict:
     expected = {
-        "benchmark_scaffolds.yaml",
-        "train_scaffold_a800.yaml",
-        "train_scaffold_frozen_rnafm_a800.yaml",
-        "train_scaffold_no_rnafm_a800.yaml",
+        "benchmark_scaffolds_linker_v5.yaml",
+        "train_scaffold_5090_linker_v5.yaml",
     }
     config_root = root / "configs"
     actual_paths = sorted(
@@ -357,12 +355,12 @@ def main() -> None:
             {
                 "name": "pytest",
                 "status": "not_run",
-                "command": [sys.executable, "-m", "pytest", "-q"],
+                "command": [sys.executable, "-m", "pytest", "tests", "-q"],
                 "reason": "disabled by --skip-tests",
             }
         )
     else:
-        checks.append(_run("pytest", [sys.executable, "-m", "pytest", "-q"]))
+        checks.append(_run("pytest", [sys.executable, "-m", "pytest", "tests", "-q"]))
     for script in ("generate_scaffold.py", "validate_scaffolds.py", "benchmark_scaffolds.py"):
         checks.append(_run(f"{script} help", [sys.executable, script, "--help"]))
 
@@ -385,10 +383,8 @@ def main() -> None:
         ["git", "status", "--short"], cwd=ROOT, capture_output=True, text=True, check=False
     ).stdout.splitlines()
     tracked_artifacts = [
-        ROOT / "configs" / "train_scaffold_a800.yaml",
-        ROOT / "configs" / "train_scaffold_frozen_rnafm_a800.yaml",
-        ROOT / "configs" / "train_scaffold_no_rnafm_a800.yaml",
-        ROOT / "configs" / "benchmark_scaffolds.yaml",
+        ROOT / "configs" / "train_scaffold_5090_linker_v5.yaml",
+        ROOT / "configs" / "benchmark_scaffolds_linker_v5.yaml",
     ]
     audit = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -399,15 +395,16 @@ def main() -> None:
         "checks": checks,
         "server_training": {
             "status": "not_run",
-            "reason": "full A800 training and checkpoint metrics must be produced on the server",
+            "reason": "RTX 5090 Linker V5 metrics must be produced on the server",
         },
         "formal_benchmark": {
             "status": "not_run",
-            "reason": "formal held-out benchmark requires canonical data and three completed A800 training manifests",
+            "reason": (
+                "formal held-out benchmarks require canonical data and their completed "
+                "V2 control manifests or Linker V4 training manifest"
+            ),
         },
-        "artifact_sha256": {
-            str(path.relative_to(ROOT)): _sha256(path) for path in tracked_artifacts if path.is_file()
-        },
+        "artifact_sha256": {str(path.relative_to(ROOT)): _sha256(path) for path in tracked_artifacts if path.is_file()},
     }
     output = Path(args.output)
     if not output.is_absolute():

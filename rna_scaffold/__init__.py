@@ -1,4 +1,4 @@
-"""RNA Scaffold Generator V2 public runtime API."""
+"""RNA Scaffold Generator public runtime API (V4 training recipe, V2 checkpoint schema)."""
 
 from rna_scaffold.generate import (
     CandidateDiversityDecision,

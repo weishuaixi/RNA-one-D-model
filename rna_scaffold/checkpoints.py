@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from rna_scaffold.geometry import validate_scaffold_length_limit
+from rna_scaffold.pretrained import TrustedRnaFmCheckpoint
 from rna_scaffold.tokenizer import RnaTokenizer
 
 if TYPE_CHECKING:
@@ -74,8 +75,11 @@ def validate_scaffold_checkpoint_version(path: str | Path) -> None:
 def load_scaffold_checkpoint(
     path: str | Path,
     device: str | torch.device = "cpu",
+    *,
+    trusted_rna_fm_checkpoint: TrustedRnaFmCheckpoint | None = None,
 ) -> LoadedScaffoldModel:
     from rna_scaffold.lightning_module import RnaScaffoldLitModule
+    from rna_scaffold.pretrained import authorize_scaffold_rna_fm_config
 
     checkpoint_path, payload = _read_checkpoint_payload(path, device=device)
     hparams = payload.get("hyper_parameters")
@@ -89,12 +93,28 @@ def load_scaffold_checkpoint(
     constructor = dict(hparams)
     constructor.setdefault("vocab_size", tokenizer.vocab_size)
     constructor.setdefault("pad_token_id", tokenizer.pad_token_id)
+    raw_metadata = payload.get("pretrained_encoder")
+    configured = constructor.get("pretrained")
+    if isinstance(configured, dict):
+        try:
+            constructor["pretrained"] = authorize_scaffold_rna_fm_config(
+                configured,
+                raw_metadata if isinstance(raw_metadata, dict) else None,
+                trusted_checkpoint=trusted_rna_fm_checkpoint,
+            )
+        except (TypeError, ValueError) as error:
+            raise CheckpointCompatibilityError(
+                f"checkpoint RNA-FM trust policy rejected the pretrained identity: {error}"
+            ) from error
+    elif trusted_rna_fm_checkpoint is not None:
+        raise CheckpointCompatibilityError(
+            "a trusted RNA-FM checkpoint was supplied, but the scaffold checkpoint "
+            "does not declare an RNA-FM pretrained encoder"
+        )
     try:
         model = RnaScaffoldLitModule(**constructor)
     except (TypeError, ValueError, RuntimeError) as error:
-        raise CheckpointCompatibilityError(
-            f"checkpoint hyper_parameters are incompatible: {error}"
-        ) from error
+        raise CheckpointCompatibilityError(f"checkpoint hyper_parameters are incompatible: {error}") from error
 
     try:
         model.load_state_dict(state_dict, strict=True)
@@ -104,7 +124,7 @@ def load_scaffold_checkpoint(
     model.eval()
     from rna_scaffold.pretrained import LoRALinear
 
-    configured = hparams.get("pretrained")
+    configured = constructor.get("pretrained")
     configured = dict(configured) if isinstance(configured, dict) else {"kind": "none"}
     configured_kind = str(configured.get("kind", "none"))
     configured_mode = "none" if configured_kind == "none" else str(configured.get("mode", "frozen"))
@@ -124,7 +144,6 @@ def load_scaffold_checkpoint(
         raise CheckpointCompatibilityError(
             "checkpoint pretrained identity does not match the reconstructed model structure"
         )
-    raw_metadata = payload.get("pretrained_encoder")
     if isinstance(raw_metadata, dict):
         metadata_kind = str(raw_metadata.get("kind", "none"))
         metadata_mode = "none" if metadata_kind == "none" else str(raw_metadata.get("mode", "frozen"))

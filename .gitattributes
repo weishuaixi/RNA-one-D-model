@@ -1,0 +1,6 @@
+*.sh text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+checkpoints_scaffold_linker_v5/rna-linker-v5-34-1.3714.ckpt filter=lfs diff=lfs merge=lfs -text
+.cache/torch/hub/checkpoints/RNA-FM_pretrained.pth filter=lfs diff=lfs merge=lfs -text

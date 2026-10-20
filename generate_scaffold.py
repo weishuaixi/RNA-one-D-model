@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from rna_scaffold.generate import (
     GenerationSettings,
@@ -34,7 +35,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enforce-gc-bounds", action="store_true")
     parser.add_argument("--min-scaffold-length", type=int, default=8)
     parser.add_argument("--min-flank-length", type=int, default=2)
+    parser.add_argument("--short-flank-min", type=int)
+    parser.add_argument("--short-flank-max", type=int)
+    parser.add_argument("--long-flank-min", type=int)
+    parser.add_argument("--long-flank-max", type=int)
+    parser.add_argument("--length-sampling", choices=("model", "uniform"), default="model")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--remask-strategy", choices=("auto", "confidence", "random"), default="auto")
+    parser.add_argument("--self-conditioning", choices=("auto", "on", "off"), default="auto")
     return parser
 
 
@@ -59,11 +67,26 @@ def main(argv: list[str] | None = None) -> int:
         enforce_gc_bounds=args.enforce_gc_bounds,
         min_scaffold_length=args.min_scaffold_length,
         min_flank_length=args.min_flank_length,
+        short_flank_min=args.short_flank_min,
+        short_flank_max=args.short_flank_max,
+        long_flank_min=args.long_flank_min,
+        long_flank_max=args.long_flank_max,
+        length_sampling=args.length_sampling,
+        remask_strategy=args.remask_strategy,
+        self_conditioning=args.self_conditioning,
     )
     candidates = generate_candidates(args.checkpoint, args.motif, settings, args.device)
     write_candidates_jsonl(candidates, args.output)
     if args.fasta_output:
         write_candidates_fasta(candidates, args.fasta_output)
+    accepted = len(candidates)
+    if accepted != settings.num_candidates:
+        print(
+            f"ERROR: generated {accepted}/{settings.num_candidates} requested candidates; "
+            "inspect generation_audit in the JSONL output",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

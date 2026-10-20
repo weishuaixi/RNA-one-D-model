@@ -6,7 +6,7 @@ pytest.importorskip("lightning.pytorch")
 
 from rna_scaffold.data import RnaMotifDenoisingDataset
 from rna_scaffold.lightning_module import RnaScaffoldLitModule, compact_fixed_motifs
-from rna_scaffold.model import ScaffoldModelOutput
+from rna_scaffold.model import ScaffoldModelOutput, compute_denoising_losses
 from rna_scaffold.records import RnaSequenceRecord
 from rna_scaffold.tokenizer import RnaTokenizer
 
@@ -116,9 +116,7 @@ def test_lightning_module_trains_on_a_real_v2_denoising_dataset_batch():
 
 
 def test_compact_fixed_motifs_removes_flank_length_and_position_leakage():
-    input_ids = torch.tensor(
-        [[3, 8, 11, 10, 3, 3], [3, 3, 9, 8, 11, 3]]
-    )
+    input_ids = torch.tensor([[3, 8, 11, 10, 3, 3], [3, 3, 9, 8, 11, 3]])
     fixed_mask = torch.tensor(
         [
             [False, True, True, True, False, False],
@@ -130,3 +128,66 @@ def test_compact_fixed_motifs_removes_flank_length_and_position_leakage():
 
     assert motifs.tolist() == [[8, 11, 10], [9, 8, 11]]
     assert attention.tolist() == [[True, True, True], [True, True, True]]
+
+
+def test_per_sequence_base_loss_prevents_long_examples_from_dominating():
+    logits = torch.tensor(
+        [
+            [[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+            [[10.0, 0.0, 0.0, 0.0], [10.0, 0.0, 0.0, 0.0], [10.0, 0.0, 0.0, 0.0]],
+        ]
+    )
+    output = ScaffoldModelOutput(logits, torch.zeros(2, 4), torch.zeros(2, 4))
+    targets = torch.tensor([[0, -100, -100], [0, 0, 0]])
+    attention = targets.ne(-100)
+    fixed = torch.zeros_like(attention)
+    lengths = torch.zeros(2, dtype=torch.long)
+
+    flattened = compute_denoising_losses(
+        output,
+        targets,
+        fixed,
+        attention,
+        lengths,
+        lengths,
+        left_length_loss_weight=0.0,
+        right_length_loss_weight=0.0,
+    )
+    normalized = compute_denoising_losses(
+        output,
+        targets,
+        fixed,
+        attention,
+        lengths,
+        lengths,
+        left_length_loss_weight=0.0,
+        right_length_loss_weight=0.0,
+        normalize_base_loss_per_sequence=True,
+    )
+
+    assert normalized.base_loss > flattened.base_loss
+
+
+def test_per_sequence_base_loss_rejects_an_unmasked_sample():
+    output = ScaffoldModelOutput(
+        torch.zeros((2, 2, 4)),
+        torch.zeros((2, 3)),
+        torch.zeros((2, 3)),
+    )
+    targets = torch.tensor([[0, -100], [-100, -100]])
+    attention = targets.ne(-100)
+    fixed = torch.zeros_like(attention)
+    lengths = torch.zeros(2, dtype=torch.long)
+
+    with pytest.raises(ValueError, match="every sample"):
+        compute_denoising_losses(
+            output,
+            targets,
+            fixed,
+            attention,
+            lengths,
+            lengths,
+            left_length_loss_weight=0.0,
+            right_length_loss_weight=0.0,
+            normalize_base_loss_per_sequence=True,
+        )

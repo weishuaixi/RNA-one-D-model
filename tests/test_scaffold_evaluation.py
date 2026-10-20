@@ -5,6 +5,7 @@ import pytest
 from rna_scaffold.benchmarking import RnaTrainingPrior
 from rna_scaffold.evaluation import (
     CandidateMetric,
+    base_composition_entropy_bits,
     maximum_homopolymer_run,
     nearest_training_similarity,
     normalized_edit_distance,
@@ -84,6 +85,9 @@ def test_sequence_diversity_and_novelty_metrics_have_hand_checked_values():
     assert nearest_training_similarity("AAAAC", ["AAAAG", "CCCCC"], k=2) == pytest.approx(1 / 3)
     assert maximum_homopolymer_run("AAAUCCCCGG") == 4
     assert maximum_homopolymer_run("") == 0
+    assert base_composition_entropy_bits("AUCG") == pytest.approx(2.0)
+    assert base_composition_entropy_bits("AAAA") == 0.0
+    assert base_composition_entropy_bits("") == 0.0
 
 
 def test_candidate_summary_aggregates_extended_metrics_without_fabricating_missing_values():
@@ -106,6 +110,10 @@ def test_candidate_summary_aggregates_extended_metrics_without_fabricating_missi
             rnafold_mfe_kcal_mol=-2.0,
             rnafold_paired_fraction=0.5,
             rnafold_motif_paired_fraction=0.25,
+            linker_length=4,
+            linker_gc_fraction=0.25,
+            linker_composition_entropy_bits=1.5,
+            linker_max_homopolymer_run=3,
         ),
         CandidateMetric(
             "m1",
@@ -122,6 +130,10 @@ def test_candidate_summary_aggregates_extended_metrics_without_fabricating_missi
             runtime_seconds=0.2,
             peak_cuda_memory_bytes=1024,
             rnafold_status="unavailable",
+            linker_length=6,
+            linker_gc_fraction=0.75,
+            linker_composition_entropy_bits=1.9,
+            linker_max_homopolymer_run=2,
         ),
     ]
 
@@ -136,6 +148,11 @@ def test_candidate_summary_aggregates_extended_metrics_without_fabricating_missi
     assert summary.rnafold_ok_rate == pytest.approx(0.5)
     assert summary.mean_rnafold_mfe_kcal_mol == pytest.approx(-2.0)
     assert summary.rnafold_failure_count == 1
+    assert summary.mean_linker_length == pytest.approx(5.0)
+    assert summary.mean_linker_gc_fraction == pytest.approx(0.5)
+    assert summary.mean_linker_composition_entropy_bits == pytest.approx(1.7)
+    assert summary.mean_linker_max_homopolymer_run == pytest.approx(2.5)
+    assert summary.maximum_linker_homopolymer_run == 3
 
 
 def test_candidate_summary_excludes_rnafold_not_run_from_attempt_rates_and_failures():
@@ -148,6 +165,42 @@ def test_candidate_summary_excludes_rnafold_not_run_from_attempt_rates_and_failu
 
     assert summary.rnafold_ok_rate == pytest.approx(1.0)
     assert summary.rnafold_failure_count == 0
+
+
+def test_linker_summary_does_not_treat_generation_shortfall_as_zero_quality_linker():
+    rows = [
+        CandidateMetric(
+            "m1",
+            "AAAAGCGGCCCC",
+            True,
+            True,
+            12,
+            0.5,
+            None,
+            linker_length=8,
+            linker_gc_fraction=0.5,
+            linker_composition_entropy_bits=1.0,
+            linker_max_homopolymer_run=4,
+        ),
+        CandidateMetric(
+            "m1",
+            "",
+            False,
+            False,
+            0,
+            0.0,
+            "generation_shortfall",
+        ),
+    ]
+
+    summary = summarize_candidates(rows)
+
+    assert summary.count == 2
+    assert summary.mean_linker_length == pytest.approx(8.0)
+    assert summary.mean_linker_gc_fraction == pytest.approx(0.5)
+    assert summary.mean_linker_composition_entropy_bits == pytest.approx(1.0)
+    assert summary.mean_linker_max_homopolymer_run == pytest.approx(4.0)
+    assert summary.maximum_linker_homopolymer_run == 4
 
 
 def test_normalized_edit_distance_has_expected_bounds():

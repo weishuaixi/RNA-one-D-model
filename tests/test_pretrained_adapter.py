@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -61,9 +62,7 @@ class TinyRnaFmEncoder(nn.Module):
     def __init__(self, layer_count: int = 4) -> None:
         super().__init__()
         self.embedding = nn.Embedding(12, self.output_dim)
-        self.layers = nn.ModuleList(
-            [TinyRnaFmLayer(self.output_dim) for _ in range(layer_count)]
-        )
+        self.layers = nn.ModuleList([TinyRnaFmLayer(self.output_dim) for _ in range(layer_count)])
 
     def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         hidden = self.embedding(input_ids)
@@ -96,14 +95,10 @@ def test_lora_injection_freezes_base_and_only_targets_last_layers():
     assert isinstance(encoder.layers[0].self_attn.q_proj, nn.Linear)
     assert isinstance(encoder.layers[2].self_attn.q_proj, LoRALinear)
     adapter_parameters = [
-        parameter
-        for name, parameter in encoder.named_parameters()
-        if ".lora_A." in name or ".lora_B." in name
+        parameter for name, parameter in encoder.named_parameters() if ".lora_A." in name or ".lora_B." in name
     ]
     base_parameters = [
-        parameter
-        for name, parameter in encoder.named_parameters()
-        if ".lora_A." not in name and ".lora_B." not in name
+        parameter for name, parameter in encoder.named_parameters() if ".lora_A." not in name and ".lora_B." not in name
     ]
     assert adapter_parameters
     assert all(parameter.requires_grad for parameter in adapter_parameters)
@@ -297,6 +292,71 @@ def test_frozen_pretrained_encoder_has_no_trainable_parameters(monkeypatch):
     assert not any(parameter.requires_grad for parameter in encoder.parameters())
 
 
+def test_hash_verified_local_checkpoint_enables_legacy_loader_only_during_load(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "rna-fm.pt"
+    checkpoint.write_bytes(b"reviewed-rna-fm")
+    expected = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+    observed = {}
+    monkeypatch.delenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", raising=False)
+
+    def fake_load(path):
+        observed["path"] = path
+        observed["compatibility"] = os.environ.get("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD")
+        return TinyEncoder()
+
+    monkeypatch.setattr(pretrained, "load_rna_fm", fake_load)
+
+    build_pretrained_encoder(
+        PretrainedEncoderConfig(
+            kind="rna_fm",
+            checkpoint=str(checkpoint),
+            expected_checkpoint_sha256=expected,
+            mode="frozen",
+        )
+    )
+
+    assert observed == {"path": str(checkpoint), "compatibility": "1"}
+    assert "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "configured_digest",
+    [None, pretrained.OFFICIAL_RNA_FM_SHA256],
+    ids=["legacy-env-config", "direct-v4-config"],
+)
+def test_scaffold_rna_fm_policy_preserves_official_release_configs(
+    monkeypatch,
+    tmp_path,
+    configured_digest,
+):
+    controlled_path = tmp_path / pretrained.RNA_FM_CHECKPOINT_FILENAME
+    monkeypatch.setattr(
+        pretrained,
+        "default_rna_fm_checkpoint_paths",
+        lambda: (controlled_path.resolve(),),
+    )
+    config = {
+        "kind": "rna_fm",
+        "checkpoint": ".cache/torch/hub/checkpoints/RNA-FM_pretrained.pth",
+        "expected_checkpoint_sha256_env": "RNA_FM_EXPECTED_SHA256",
+        "mode": "lora",
+    }
+    if configured_digest is not None:
+        config["expected_checkpoint_sha256"] = configured_digest
+
+    authorized = pretrained.authorize_scaffold_rna_fm_config(
+        config,
+        {
+            "expected_checkpoint_sha256": pretrained.OFFICIAL_RNA_FM_SHA256,
+            "checkpoint_sha256": pretrained.OFFICIAL_RNA_FM_SHA256,
+        },
+    )
+
+    assert authorized["checkpoint"] == str(controlled_path.resolve())
+    assert authorized["expected_checkpoint_sha256"] == pretrained.OFFICIAL_RNA_FM_SHA256
+    assert authorized["expected_checkpoint_sha256_env"] is None
+
+
 def test_pretrained_features_are_projected_into_generator_width():
     encoder = TinyEncoder()
     model = MotifDenoisingTransformer(
@@ -435,9 +495,7 @@ def test_lora_checkpoint_metadata_records_adapter_contract(monkeypatch, tmp_path
     assert metadata["checkpoint_sha256"] == hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
     assert metadata["parameter_counts"] == {
         "total": sum(parameter.numel() for parameter in encoder.parameters()),
-        "trainable": sum(
-            parameter.numel() for parameter in encoder.parameters() if parameter.requires_grad
-        ),
+        "trainable": sum(parameter.numel() for parameter in encoder.parameters() if parameter.requires_grad),
     }
 
 
@@ -465,11 +523,7 @@ def test_optimizer_contains_all_and_only_trainable_parameters(monkeypatch):
 
     optimizer = module.configure_optimizers()["optimizer"]
 
-    optimized_ids = {
-        id(parameter)
-        for group in optimizer.param_groups
-        for parameter in group["params"]
-    }
+    optimized_ids = {id(parameter) for group in optimizer.param_groups for parameter in group["params"]}
     trainable_ids = {id(parameter) for parameter in module.parameters() if parameter.requires_grad}
     frozen_ids = {id(parameter) for parameter in module.parameters() if not parameter.requires_grad}
     assert optimized_ids == trainable_ids
@@ -517,3 +571,31 @@ def test_missing_rna_fm_explains_optional_install(monkeypatch):
         assert "pip install rna-fm" in str(error)
     else:
         raise AssertionError("missing RNA-FM must raise a useful error")
+
+
+def test_local_rna_fm_checkpoint_uses_the_rna_alphabet(monkeypatch, tmp_path):
+    captured = {}
+
+    class FakeAlphabet:
+        padding_idx = 0
+        mask_idx = 1
+
+        @staticmethod
+        def get_idx(base):
+            return {"A": 2, "U": 3, "C": 4, "G": 5}[base]
+
+    class FakePretrained:
+        @staticmethod
+        def load_model_and_alphabet_local(path, *, theme):
+            captured["path"] = path
+            captured["theme"] = theme
+            return nn.Identity(), FakeAlphabet()
+
+    fake_fm = type("FakeFm", (), {"pretrained": FakePretrained})()
+    monkeypatch.setattr(pretrained, "_import_fm", lambda: fake_fm)
+    checkpoint = tmp_path / "RNA-FM_pretrained.pth"
+
+    encoder = pretrained.load_rna_fm(str(checkpoint))
+
+    assert captured == {"path": checkpoint, "theme": "rna"}
+    assert isinstance(encoder, pretrained.RnaFmEncoder)

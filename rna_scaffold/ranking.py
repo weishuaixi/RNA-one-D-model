@@ -32,12 +32,29 @@ def _raw(candidate: ScaffoldCandidate, fold: RnafoldResult | None) -> dict[str, 
         if fold is not None and fold.status == "ok" and fold.mfe_kcal_mol is not None
         else None
     )
+    linker_gc_fraction = candidate.gc_fraction if candidate.linker_gc_fraction is None else candidate.linker_gc_fraction
+    linker_max_homopolymer = (
+        candidate.max_homopolymer if candidate.linker_max_homopolymer is None else candidate.linker_max_homopolymer
+    )
+    linker_composition_entropy = (
+        candidate.base_entropy if candidate.linker_composition_entropy is None else candidate.linker_composition_entropy
+    )
+    likelihood = (
+        candidate.normalized_log_probability
+        if candidate.combined_normalized_log_probability is None
+        else candidate.combined_normalized_log_probability
+    )
     return {
-        "likelihood": candidate.normalized_log_probability,
+        "likelihood": likelihood,
         "base_entropy": candidate.base_entropy,
-        "confidence_quality": 1.0 / (1.0 + max(0.0, candidate.base_entropy)),
-        "gc_quality": max(0.0, 1.0 - abs(candidate.gc_fraction - 0.5) / 0.5),
-        "homopolymer_quality": max(0.0, 1.0 - candidate.max_homopolymer / 8.0),
+        "linker_gc_fraction": linker_gc_fraction,
+        "linker_max_homopolymer": float(linker_max_homopolymer),
+        "linker_composition_entropy": linker_composition_entropy,
+        "constraint_forced_argmax_rate": candidate.constraint_forced_argmax_rate,
+        "constraint_log_probability_mass": candidate.constraint_log_probability_mass,
+        "confidence_quality": candidate.mean_token_confidence,
+        "gc_quality": max(0.0, 1.0 - abs(linker_gc_fraction - 0.5) / 0.5),
+        "homopolymer_quality": max(0.0, 1.0 - linker_max_homopolymer / 8.0),
         "mfe_per_nt": mfe_per_nt,
         "mfe_quality": None if mfe_per_nt is None else max(0.0, 1.0 - abs(mfe_per_nt + 0.3) / 0.7),
         "paired_fraction": fold.paired_fraction if fold is not None and fold.status == "ok" else None,
